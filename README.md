@@ -44,7 +44,7 @@ Replace handset ──► Call ends
 ### Phase 1: Bluetooth Gateway (current)
 
 - [x] ES8388 codec init + I2S audio — tone test confirmed
-- [ ] Bluetooth HFP pairing as "FestStefan"
+- [x] Bluetooth HFP pairing as "FestStefan" — connected to Pixel 8 Pro
 - [ ] Call audio routed to headphone jack
 - [ ] Simulation mode using onboard keys (KEY1-KEY6)
 - [ ] State machine: IDLE / RINGING / DIALING / IN_CALL

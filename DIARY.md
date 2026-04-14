@@ -9,7 +9,7 @@ It started with a simple question: *can I make an old rotary phone work as a Blu
 ## What I Bought
 
 **The phone:**
-- DDR RFT rotary phone, Typ 550-14012, VEB Fernmeldewerk Nordhausen, 1981 — found on Kleinanzeigen Berlin (Moabit), €20
+- DDR RFT rotary phone, Typ 550-14012, VEB Fernmeldewerk Nordhausen, 1981 — bought on Kleinanzeigen Berlin (Moabit), €20, picking up Thursday 2026-04-17
 
 **Electronics:**
 - ESP32 Audio Kit A1S (Ai-Thinker, ES8388 codec) — ~€29, Amazon.de
@@ -19,8 +19,12 @@ It started with a simple question: *can I make an old rotary phone work as a Blu
 - Lead-free solder 0.6mm, 20g — ~€5.79, Amazon.de
 - Heat shrink tube set 328 pieces — ~€4.99, Amazon.de
 - QWORK third hand with magnifying glass — ~€9.84, Amazon.de
-- Velcro mounting tape 50x100mm — ~€5.99, Amazon.de
-- Micro USB cable — already bought
+- Self-adhesive tape strips 50x100mm pack of 20 — ~€5.99, Amazon.de
+- XGMATT USB-C to Micro-USB cable 0.5m × 2 — Amazon.de
+- Sourcing Map electret condenser microphone capsule 6mm × 3.5mm, pack of 3 — Amazon.de
+- Weewooday 2W 8Ω mini metal shell speakers × 6 — Amazon.de
+- Elegoo 120pcs Dupont wire kit (M-F, M-M, F-F) — Amazon.de
+- UHU patafix transparent double-sided adhesive pads, pack of 56 — Amazon.de
 - WS2812B LED ring — TBD (measure phone dial cavity first)
 - 80W soldering iron set — ~€21.99, Amazon.de (budget option, sufficient for 6 solder joints)
 - USB wall charger for ESP32 power — using existing charger from home
@@ -31,10 +35,8 @@ It started with a simple question: *can I make an old rotary phone work as a Blu
 
 ## What Tools We Used During This Chat
 
-- **Gmail MCP** — dug up the original Hikvision camera order (Allegro, 2021), the LED bulb order (BA15S, 12V), and found the construction notes from Mateusz about CAT5/6 cable layout in Mnichowice
-- **Web search** — found Amazon.de product links, checked Shelly/Sonoff prices, researched ESP32 Audio Kit variants, found Jouke's "Bakelite to the Future" project, looked up Vodafone DNS settings, checked HWD-7108MH-G2 firmware availability
-- **nmap on Mac** — scanned the home network, identified 17 devices including the Shelly ESP32, two BSH appliances, Tuya bulbs, Google Nest speakers
-- **Router audit** — reviewed all TP-Link Archer AX10 settings via screenshots: WiFi, DHCP, DNS, firewall, ALG, port forwarding, UPnP, IGMP, IPTV
+- **Gmail MCP** — retrieved order history to confirm the BA15S 12V lamp spec, which led to the Shelly Plus 1PM decision
+- **Web search** — found Amazon.de product links, checked Shelly/Sonoff prices, researched ESP32 Audio Kit variants, found Jouke's "Bakelite to the Future" project
 
 ---
 
@@ -55,17 +57,6 @@ It started with a simple question: *can I make an old rotary phone work as a Blu
 - Shelly 1 Mini Gen3 (Matter, cheapest) — out of stock for a month
 - Sonoff Mini R2 (no Matter, new app) — dismissed
 - Shelly Plus 1PM — chosen, already in basket, has power monitoring as bonus
-
-**Camera system (Mnichowice):**
-- Discovered via Gmail that 5x TVI cameras + 8ch HiWatch DVR (HWD-7108MH-G2) were bought in 2021
-- Cameras connect via CAT5/6 + video baluns, not PoE
-- 2 uninstalled cameras need: 2x video balun (~14 zł each) + 2x power connector (~2 zł each)
-- DVR firmware is V3.5.37 (2018), too old for Remote Config — needs USB flash update to V4.30.101 when on site
-
-**WiFi setup:**
-- Vodafone Station in bridge mode → TP-Link Archer AX10 as router
-- Full router audit: WPA2 on 2.4GHz, WPA3+WPA2 on 5GHz, channel 6, DHCP DNS updated to 1.1.1.1 + 8.8.8.8, UPnP reviewed, SIP ALG noted
-- Smart home stays on 2.4GHz, phones/Mac on 5GHz — separate SSIDs by design
 
 ---
 
@@ -88,15 +79,12 @@ The **LED ring** was added as visual feedback but became a genuine design elemen
 3. Built out the full shopping list across amazon.de and Allegro
 4. Identified DDR RFT Typ 550 phone on Kleinanzeigen Berlin — €20, Moabit
 5. Researched soldering tools, safety, and beginner YouTube resources
-6. Clarified that TVI cameras in Mnichowice need baluns + power connectors, not PoE
-7. Investigated HWD-7108MH-G2 DVR — confirmed firmware update path via USB pendrive
-8. Audited and optimised home WiFi router (TP-Link Archer AX10) — DNS, channels, security
-9. Identified BA15S 12V lamp via Gmail — chose Shelly Plus 1PM on 230V side as smart switch
-10. Designed full MVP user journey and V2 scope
-11. Decided on Gemini Live as V2 AI interface instead of hardcoded smart home shortcuts
-12. Wrote complete project spec document ready for Cowork + Claude Code
-13. ESP32 Audio Kit A1S ordered — arriving soon
-14. VS Code + ESP-IDF already set up and ready
+6. Identified BA15S 12V lamp via Gmail — chose Shelly Plus 1PM on 230V side as smart switch
+7. Designed full MVP user journey and V2 scope
+8. Decided on Gemini Live as V2 AI interface instead of hardcoded smart home shortcuts
+9. Wrote complete project spec document ready for Cowork + Claude Code
+10. ESP32 Audio Kit A1S ordered and delivered 2026-04-14
+11. VS Code + ESP-IDF already set up and ready
 
 ---
 
@@ -175,9 +163,28 @@ The ESP32 Audio Kit arrived. Plugged it in, ran the I2C scanner from the previou
 
 ---
 
+### 2026-04-14 (evening) — Bluetooth pairing works!
+
+Wrote `bluetooth.c` with full HFP Hands-Free client init. Flashed, opened Bluetooth settings on Pixel 8 Pro, and "FestStefan" appeared immediately. Paired via SSP (Secure Simple Pairing), Service Level Connection established.
+
+**What the logs showed:**
+- Authentication success with "And. Pixel 8 Pro"
+- SLC connected — all HFP indicators flowing: signal strength, battery level, network status, call state
+- In-band ring tone negotiation happened automatically
+- BT address: `e0:8c:fe:64:42:2e`
+
+**Key decisions:**
+- SSP with IO capability "None" (just-works pairing, no PIN prompt) — simplest for a headset device
+- Also set legacy PIN "0000" as fallback for older phones
+- Device name "FestStefan" confirmed visible and pairable
+
+**Binary size:** 673KB with Bluetooth stack (was 189KB without). 36% of flash partition still free.
+
+---
+
 ## Next Steps
 
-- **Immediate:** Bluetooth HFP — pair as "FestStefan", route call audio to headphones
+- **Immediate:** Route HFP call audio to headphones — hear a real phone call
 - **Then:** Simulation keys (KEY1-KEY6) + state machine + LED patterns
 - **Then:** Physical phone integration when it arrives (hook switch GPIO 4, rotary dial GPIO 16/17)
 - **V2:** WiFi + Gemini Live voice assistant
