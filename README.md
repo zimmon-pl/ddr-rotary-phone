@@ -4,7 +4,7 @@
 
 The vision: pick up the handset and talk to an AI. Spin the rotary dial and call someone through your mobile phone. When someone calls you, the phone rings — and you answer by lifting the handset. WhatsApp, FaceTime, regular calls, or just a conversation with Gemini. All through a phone that was made in East Germany nine years before I was born.
 
-This is a work in progress. Right now the ESP32 board inside plays a test tone through the headphone jack. That's it. But it's a start.
+This is a work in progress. So far the ESP32 board plays audio through the headphone jack and pairs with a phone via Bluetooth as "FestStefan". Call audio routing is next.
 
 ### Built without engineering skills
 
@@ -92,6 +92,31 @@ Replace handset ──► Call ends
 | KEY4 | 23 | Send dialed number |
 | KEY5 | 18 | Volume up |
 | KEY6 | 5 | Volume down |
+
+## What You Need
+
+**The phone:** Any rotary phone with a hook switch and pulse dial. Ours is a DDR RFT Typ 550 from 1981, bought on Kleinanzeigen Berlin for €20.
+
+**Electronics:**
+- ESP32 Audio Kit V2.2 (Ai-Thinker A1S) — ~€29
+- Electret condenser microphone capsule 6mm — for handset mic
+- 2W 8Ω mini speakers — for handset earpiece
+- Dupont wire kit (M-F, M-M, F-F) — for prototyping connections
+- WS2812B LED ring — for dial cavity lighting (size TBD)
+
+**Tools:**
+- Soldering iron (budget 80W set works fine)
+- Digital multimeter
+- Lead-free solder 0.6mm
+- Flux + desoldering braid
+- Third hand with magnifying glass
+- Heat shrink tube set
+
+**Software:**
+- VS Code + Claude Code
+- ESP-IDF v6.0
+
+Total hardware spend: ~€160 including the phone. Full shopping list with links in [DIARY.md](DIARY.md).
 
 ## Building
 
