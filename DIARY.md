@@ -180,6 +180,50 @@ Wrote `bluetooth.c` with full HFP Hands-Free client init. Flashed, opened Blueto
 
 **Binary size:** 673KB with Bluetooth stack (was 189KB without). 36% of flash partition still free.
 
+### 2026-04-14 (evening) — Bluetooth pairing works! 
+
+Making a phone call as well. Logs below. I ran out of credits on Claude, so this is everything for today, and I could even barely hear some voice when I called someone. It was just very quiet, so we probably need to modify a little bit the volume. We can start from this next time. 
+
+W (170649) BT_HCI: hcif mode change: hdl 0x80, mode 0, intv 0, status 0x0
+I (170659) bluetooth: Power mode changed: 0
+I (170679) bluetooth: Call setup: outgoing_dialing
+I (170679) bluetooth: Call setup: outgoing_alerting
+I (170699) bluetooth: Audio: connected_msbc
+I (170699) audio: Starting call audio at 16000 Hz
+I (170699) audio: DAC unmuted
+I (170699) audio: Call audio started
+I (170699) audio: Call audio task started
+I (171549) bluetooth: Volume speaker: 5
+I (171699) bluetooth: Call indicator: CALL IN PROGRESS
+I (171759) bluetooth: Call setup: none
+I (176079) bluetooth: Volume speaker: 6
+I (176809) bluetooth: Volume speaker: 5
+I (176869) bluetooth: Volume speaker: 6
+I (176939) bluetooth: Volume speaker: 7
+I (176979) bluetooth: Volume speaker: 8
+I (177069) bluetooth: Volume speaker: 9
+I (177329) bluetooth: Volume speaker: 10
+I (178189) bluetooth: Volume speaker: 11
+I (178449) bluetooth: Volume speaker: 12
+I (178499) bluetooth: Volume speaker: 13
+I (178559) bluetooth: Volume speaker: 14
+I (178559) bluetooth: Volume speaker: 15
+W (185759) BT_HCI: hci cmd send: sniff: hdl 0x80, intv(400 800)
+W (185759) BT_HCI: hcif mode change: hdl 0x80, mode 0, intv 0, status 0x20
+E (185759) BT_APPL: bta_dm_pm_btm_status hci_status=32
+I (185769) bluetooth: Power mode changed: 0
+W (223769) BT_HCI: hcif disc complete: hdl 0x180, rsn 0x13 dev_find 1
+I (223769) bluetooth: Audio: disconnected
+I (223769) audio: Stopping call audio
+I (223809) audio: Call audio task ended
+I (223869) audio: DAC muted
+I (223869) audio: Call audio stopped, I2S back to 44100 Hz
+I (223869) bluetooth: Call indicator: no call
+I (224169) bluetooth: Signal strength: 5
+
+These locks should be removed once Claude updates the diary. 
+
+
 ---
 
 ## Next Steps
