@@ -1,73 +1,42 @@
-// main.c — DDR Rotary Phone Bluetooth Headset
-// Entry point: initializes NVS, Bluetooth stack, and all hardware modules.
+// main.c — FestStefan tone test
+//
+// Task 1: Confirm audio works by playing a 440Hz beep through headphones.
+// Plug headphones into 3.5mm jack, flash, listen for the beep.
 
 #include <stdio.h>
-#include "nvs.h"
-#include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_log.h"
-#include "esp_bt.h"
-#include "esp_bt_main.h"
-
-// Module init declarations
-void bluetooth_init(void);
-void audio_init(void);
-void rotary_dial_init(void);
-void hook_switch_init(void);
-void dial_actions_init(void);
-void led_init(void);
-void tones_init(void);
+#include "audio.h"
 
 static const char *TAG = "main";
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "DDR Rotary Phone starting...");
+    printf("\n*** FestStefan — Tone Test ***\n\n");
 
-    // 1. Initialize NVS (required by Bluetooth stack)
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+    esp_err_t ret = audio_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Audio init failed — check I2C/codec connection");
+        return;
     }
-    ESP_ERROR_CHECK(ret);
-    ESP_LOGI(TAG, "NVS initialized");
 
-    // 2. Release BLE memory (we only use Classic BT)
-    ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
+    // Play 440Hz tone for 2 seconds
+    ESP_LOGI(TAG, "Playing test tone — listen on headphones!");
+    audio_play_tone(440, 2000);
 
-    // 3. Initialize BT controller
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
-    ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT));
-    ESP_LOGI(TAG, "BT controller enabled (Classic only)");
+    // Play a second tone at a different pitch so you know it's intentional
+    vTaskDelay(pdMS_TO_TICKS(500));
+    ESP_LOGI(TAG, "Playing second tone (880Hz)...");
+    audio_play_tone(880, 1000);
 
-    // 4. Initialize Bluedroid stack
-    ESP_ERROR_CHECK(esp_bluedroid_init());
-    ESP_ERROR_CHECK(esp_bluedroid_enable());
-    ESP_LOGI(TAG, "Bluedroid enabled");
+    // Mute after test — I2S DMA loops the last buffer otherwise
+    audio_set_mute(true);
 
-    // 5. Initialize hardware modules
-    audio_init();
-    ESP_LOGI(TAG, "Audio initialized");
+    ESP_LOGI(TAG, "TONE TEST COMPLETE — if you heard two beeps, audio works!");
 
-    led_init();
-    ESP_LOGI(TAG, "LED initialized");
-
-    tones_init();
-    ESP_LOGI(TAG, "Tones initialized");
-
-    hook_switch_init();
-    ESP_LOGI(TAG, "Hook switch initialized");
-
-    rotary_dial_init();
-    ESP_LOGI(TAG, "Rotary dial initialized");
-
-    dial_actions_init();
-    ESP_LOGI(TAG, "Dial actions initialized");
-
-    // 6. Initialize Bluetooth HFP (after Bluedroid is up)
-    bluetooth_init();
-    ESP_LOGI(TAG, "Bluetooth HFP initialized");
-
-    ESP_LOGI(TAG, "All modules initialized — ready");
+    // Keep running (don't exit app_main on ESP32)
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
 }

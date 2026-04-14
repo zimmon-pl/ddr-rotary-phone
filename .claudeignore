@@ -1,0 +1,10 @@
+build/
+managed_components/
+.pio/
+.vscode/
+.idea/
+sdkconfig
+sdkconfig.old
+*.bin
+*.elf
+*.map

@@ -6,22 +6,27 @@ Convert a 1981 DDR RFT rotary phone (VEB Fernmeldewerk Nordhausen, Typ 550-14012
 
 ---
 
-## Hardware
+## Hardware (CONFIRMED 2026-04-14)
 
-- **Board:** ESP32 Audio Kit A1S (Ai-Thinker, ES8388 codec)
+- **Board:** ESP32 Audio Kit A1S (Ai-Thinker), PCB revision **A541**, module **K536**, chip rev **v3.1**
+- **Codec:** ES8388 at I2C address 0x10 — **Variant 1 (Board 5)** confirmed by I2C scan
 - **Phone:** DDR RFT rotary phone Typ 550, 1981
 - **LED:** WS2812B LED ring (size TBD — measure after opening phone)
 - **Power:** 5V USB via Micro USB cable
 - **Mounting:** Velcro pads inside phone base
+- **Serial port:** `/dev/cu.usbserial-0001`
 
 ---
 
 ## Firmware Stack
 
-- **ESP-IDF** (not Arduino)
-- **ESP-ADF** on top of ESP-IDF
-- **Base SDK:** `Ai-Thinker-Open/ESP32-A1S-AudioKit`
-- **Logic reference:** `jtwaleson/bakelite-to-the-future-esp32` — different hardware, so logic reference only; audio layer needs full adaptation for ES8388
+- **ESP-IDF v6.0** (not Arduino) — path: `~/.espressif/v6.0/esp-idf`
+- **ESP-ADF** installed at `~/esp/esp-adf` (reference only — not using its build system)
+- **Codec driver:** Direct ES8388 I2C register writes in `main/audio.c` (no external component needed — **confirmed working 2026-04-14**)
+- **Logic reference:** `jtwaleson/bakelite-to-the-future-esp32` — different hardware, logic reference only
+- **Build/Flash/Monitor:** Use `./build.sh build|flash|monitor|all`
+- **Do NOT** manually manage Python venvs or run `pip install`. The build script handles all paths.
+- **Do NOT** suggest `idf.py add-dependency` for the codec — our direct driver works.
 
 ---
 
@@ -116,16 +121,41 @@ Dial `999` = factory reset / BT re-pair
 
 ---
 
-## GPIO Pin Assignments (TBD)
+## GPIO Pin Assignments (CONFIRMED)
 
-Depends on board revision. Once board arrives, identify revision (A210 or A237) from number printed on PCB underside and configure accordingly.
-
+### ES8388 codec pins (DO NOT USE for anything else)
 | Signal | GPIO |
 |---|---|
-| Hook switch | TBD |
-| Rotary dial pulse | TBD |
-| WS2812B data | TBD (GPIO22 likely free) |
-| ES8388 config | Per revision `dac_config` |
+| I2C SDA | 33 |
+| I2C SCL | 32 |
+| I2S MCLK | 0 |
+| I2S BCK | 27 |
+| I2S WS | 25 |
+| I2S DOUT | 26 |
+| I2S DIN | 35 (input only) |
+| PA enable | 21 (must set HIGH for speaker output) |
+
+### Other board pins (DO NOT USE)
+| GPIO | Used by |
+|---|---|
+| 1 | UART TX |
+| 3 | UART RX |
+| 5 | Headphone detect |
+| 13 | Button MODE / SD card |
+| 22 | Green LED (on board) |
+| 34 | SD card interrupt (input only) |
+| 36 | Button REC (input only) |
+
+### Our project pins
+| Signal | GPIO |
+|---|---|
+| Hook switch | 4 |
+| Rotary dial pulse (nsi) | 16 |
+| Rotary dial off-normal (nsr) | 17 |
+| WS2812B LED ring data | TBD (22 is green LED on board — maybe use 2 or 15) |
+
+### Free GPIOs available
+2, 4, 12, 14, 15, 16, 17, 18, 19, 23
 
 ---
 
@@ -200,10 +230,12 @@ Reflashing: unlimited, ~30 seconds per flash via Micro USB.
 
 ## Notes for Claude Code
 
-- Start with `idf.py build` to verify toolchain before touching hardware
-- Board needs Micro USB cable — powers and flashes via same cable
-- Flash command: `idf.py flash monitor`
-- First flash may require holding `BOOT` button on board
-- ES8388 `dac_config` varies by board revision — confirm revision after receiving hardware by photographing PCB underside
+- **Board is confirmed — do NOT re-scan or ask about revision.** It's A541/K536, ES8388 Variant 1, chip v3.1. All pins are documented above.
+- **Always use ESP-IDF v6.0** from `~/.espressif/v6.0/esp-idf` — never fall back to v5.2.3
+- Serial port: `/dev/cu.usbserial-0001`
+- Flash: `python3 $IDF_PATH/tools/idf.py -p /dev/cu.usbserial-0001 flash`
+- Monitor (from real terminal, not Claude Code): `python3 $IDF_PATH/tools/idf.py -p /dev/cu.usbserial-0001 monitor`
+- To read serial from Claude Code, use pyserial (see I2C scanner session for example)
+- GPIO 21 must be set HIGH to enable the onboard power amplifier for speaker output
 - WS2812B ring size TBD — measure dial cavity before ordering ring
-- `rotary_dial.c` and `hook_switch.c` can be started immediately in Wokwi before hardware arrives
+- Wokwi simulator: use `wokwi-esp32-devkit-v1` board type, start with "Wait for Debugger" mode
