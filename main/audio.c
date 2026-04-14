@@ -8,6 +8,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/ringbuf.h"
 #include "driver/i2c.h"
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
@@ -39,9 +40,15 @@ static const char *TAG = "audio";
 #define TONE_BUF_SAMPLES  256         // samples per I2S write
 
 // ---------------------------------------------------------------------------
-// I2S channel handle
+// I2S channel handle + call audio state
 // ---------------------------------------------------------------------------
 static i2s_chan_handle_t i2s_tx_handle = NULL;
+static RingbufHandle_t call_ringbuf = NULL;
+static TaskHandle_t call_task_handle = NULL;
+static bool call_active = false;
+
+#define CALL_RINGBUF_SIZE  4096   // ~250ms at 8kHz mono 16-bit
+#define CALL_TASK_STACK    4096
 
 // ---------------------------------------------------------------------------
 // ES8388 I2C register read/write
@@ -290,4 +297,130 @@ esp_err_t audio_set_mute(bool mute)
 {
     ESP_LOGI(TAG, "DAC %s", mute ? "muted" : "unmuted");
     return es8388_write_reg(0x19, mute ? 0x04 : 0x00);
+}
+
+// ---------------------------------------------------------------------------
+// Call audio playback task — reads mono PCM from ring buffer,
+// duplicates to stereo, writes to I2S
+// ---------------------------------------------------------------------------
+static void call_audio_task(void *arg)
+{
+    ESP_LOGI(TAG, "Call audio task started");
+    int16_t stereo_buf[256];  // 128 stereo samples
+
+    while (call_active) {
+        size_t item_size = 0;
+        void *item = xRingbufferReceiveUpTo(call_ringbuf, &item_size,
+                                             pdMS_TO_TICKS(50), 256);
+        if (item == NULL || item_size == 0) {
+            continue;
+        }
+
+        // item contains mono 16-bit PCM samples
+        const int16_t *mono = (const int16_t *)item;
+        size_t mono_samples = item_size / 2;
+
+        // Convert mono to stereo (duplicate each sample)
+        for (size_t i = 0; i < mono_samples && i < 128; i++) {
+            stereo_buf[i * 2]     = mono[i];
+            stereo_buf[i * 2 + 1] = mono[i];
+        }
+
+        vRingbufferReturnItem(call_ringbuf, item);
+
+        size_t bytes_written = 0;
+        i2s_channel_write(i2s_tx_handle, stereo_buf,
+                          mono_samples * 4,  // stereo 16-bit = 4 bytes per sample
+                          &bytes_written, pdMS_TO_TICKS(100));
+    }
+
+    ESP_LOGI(TAG, "Call audio task ended");
+    vTaskDelete(NULL);
+}
+
+// ---------------------------------------------------------------------------
+// Public: start call audio mode
+// ---------------------------------------------------------------------------
+esp_err_t audio_start_call(uint32_t sample_rate)
+{
+    if (call_active) return ESP_OK;
+
+    ESP_LOGI(TAG, "Starting call audio at %lu Hz", sample_rate);
+
+    // Reconfigure I2S clock for voice sample rate
+    i2s_channel_disable(i2s_tx_handle);
+
+    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
+    esp_err_t ret = i2s_channel_reconfig_std_clock(i2s_tx_handle, &clk_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to reconfig I2S clock: %s", esp_err_to_name(ret));
+        i2s_channel_enable(i2s_tx_handle);
+        return ret;
+    }
+
+    i2s_channel_enable(i2s_tx_handle);
+
+    // Create ring buffer for BT → I2S data flow
+    call_ringbuf = xRingbufferCreate(CALL_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
+    if (call_ringbuf == NULL) {
+        ESP_LOGE(TAG, "Failed to create call ring buffer");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Unmute DAC
+    audio_set_mute(false);
+
+    // Start playback task
+    call_active = true;
+    xTaskCreate(call_audio_task, "call_audio", CALL_TASK_STACK, NULL, 5, &call_task_handle);
+
+    ESP_LOGI(TAG, "Call audio started");
+    return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Public: stop call audio mode
+// ---------------------------------------------------------------------------
+esp_err_t audio_stop_call(void)
+{
+    if (!call_active) return ESP_OK;
+
+    ESP_LOGI(TAG, "Stopping call audio");
+
+    // Signal task to stop
+    call_active = false;
+    if (call_task_handle) {
+        // Wait for task to exit
+        vTaskDelay(pdMS_TO_TICKS(100));
+        call_task_handle = NULL;
+    }
+
+    // Mute DAC
+    audio_set_mute(true);
+
+    // Free ring buffer
+    if (call_ringbuf) {
+        vRingbufferDelete(call_ringbuf);
+        call_ringbuf = NULL;
+    }
+
+    // Reconfigure I2S back to 44100Hz for tones
+    i2s_channel_disable(i2s_tx_handle);
+    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE);
+    i2s_channel_reconfig_std_clock(i2s_tx_handle, &clk_cfg);
+    i2s_channel_enable(i2s_tx_handle);
+
+    ESP_LOGI(TAG, "Call audio stopped, I2S back to %d Hz", SAMPLE_RATE);
+    return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Public: write incoming call audio (called from BT task, non-blocking)
+// ---------------------------------------------------------------------------
+void audio_write_call_data(const uint8_t *data, uint32_t len)
+{
+    if (!call_active || call_ringbuf == NULL || len == 0) return;
+
+    // Non-blocking write — drop data if buffer full (better than blocking BT task)
+    xRingbufferSend(call_ringbuf, data, len, 0);
 }

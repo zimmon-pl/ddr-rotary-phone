@@ -19,4 +19,14 @@ esp_err_t audio_set_volume(uint8_t volume);
 // Mute or unmute DAC output
 esp_err_t audio_set_mute(bool mute);
 
+// Start call audio: reconfigure I2S for voice, unmute DAC
+// sample_rate: 8000 for CVSD, 16000 for mSBC
+esp_err_t audio_start_call(uint32_t sample_rate);
+
+// Stop call audio: mute DAC, reconfigure I2S back to 44100Hz stereo
+esp_err_t audio_stop_call(void);
+
+// Write incoming call audio (mono 16-bit PCM) — called from BT task
+void audio_write_call_data(const uint8_t *data, uint32_t len);
+
 #endif

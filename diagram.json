@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "author": "DDR Rotary Phone Project",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-pushbutton", "id": "btn_pulse", "top": 150, "left": -150, "attrs": { "color": "red", "label": "PULSE (nsi)", "bounce": "0" } },
+    { "type": "wokwi-slide-switch", "id": "sw_offnormal", "top": 150, "left": -50, "attrs": { "label": "DIAL ACTIVE", "bounce": "0" } },
+    { "type": "wokwi-slide-switch", "id": "sw_hook", "top": 150, "left": 150, "attrs": { "label": "HANDSET", "bounce": "0" } }
+  ],
+  "connections": [
+    [ "esp:TX0", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX0", "$serialMonitor:TX", "", [] ],
+    [ "esp:GND.1", "btn_pulse:2.r", "black", [] ],
+    [ "esp:D2", "btn_pulse:1.l", "red", [] ],
+    [ "esp:GND.2", "sw_offnormal:3", "black", [] ],
+    [ "esp:D15", "sw_offnormal:2", "blue", [] ],
+    [ "esp:GND.2", "sw_hook:3", "black", [] ],
+    [ "esp:D4", "sw_hook:2", "green", [] ]
+  ]
+}

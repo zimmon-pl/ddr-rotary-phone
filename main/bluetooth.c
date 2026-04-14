@@ -16,7 +16,9 @@
 #include "esp_bt_device.h"
 #include "esp_gap_bt_api.h"
 #include "esp_hf_client_api.h"
+#include "esp_hf_client_legacy_api.h"
 #include "bluetooth.h"
+#include "audio.h"
 
 static const char *TAG = "bluetooth";
 
@@ -62,6 +64,22 @@ static void gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *par
 }
 
 // ---------------------------------------------------------------------------
+// HFP audio data callbacks (Voice over HCI)
+// ---------------------------------------------------------------------------
+static void hf_incoming_data_cb(const uint8_t *buf, uint32_t len)
+{
+    // Decoded PCM from BT stack → ring buffer → I2S → headphones
+    audio_write_call_data(buf, len);
+}
+
+static uint32_t hf_outgoing_data_cb(uint8_t *buf, uint32_t len)
+{
+    // Microphone data — send silence for now
+    memset(buf, 0, len);
+    return len;
+}
+
+// ---------------------------------------------------------------------------
 // HFP client callback — handles connection, call, and audio events
 // ---------------------------------------------------------------------------
 static void hf_client_callback(esp_hf_client_cb_event_t event, esp_hf_client_cb_param_t *param)
@@ -79,6 +97,16 @@ static void hf_client_callback(esp_hf_client_cb_event_t event, esp_hf_client_cb_
     case ESP_HF_CLIENT_AUDIO_STATE_EVT: {
         const char *states[] = {"disconnected", "connecting", "connected", "connected_msbc"};
         ESP_LOGI(TAG, "Audio: %s", states[param->audio_stat.state]);
+
+        if (param->audio_stat.state == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED) {
+            // CVSD codec: 8kHz
+            audio_start_call(8000);
+        } else if (param->audio_stat.state == ESP_HF_CLIENT_AUDIO_STATE_CONNECTED_MSBC) {
+            // mSBC (Wide Band Speech): 16kHz
+            audio_start_call(16000);
+        } else if (param->audio_stat.state == ESP_HF_CLIENT_AUDIO_STATE_DISCONNECTED) {
+            audio_stop_call();
+        }
         break;
     }
 
@@ -149,6 +177,9 @@ static void bt_stack_ready(void)
     esp_bt_gap_register_callback(gap_callback);
     esp_hf_client_register_callback(hf_client_callback);
     esp_hf_client_init();
+
+    // Register audio data callbacks for Voice over HCI
+    esp_hf_client_register_data_callback(hf_incoming_data_cb, hf_outgoing_data_cb);
 
     // SSP (Secure Simple Pairing) — "just works" mode
     esp_bt_sp_param_t param_type = ESP_BT_SP_IOCAP_MODE;
