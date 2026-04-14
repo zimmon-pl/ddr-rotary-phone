@@ -1,8 +1,18 @@
 # FestStefan
 
-A 1981 DDR rotary phone converted into a Bluetooth hands-free headset and AI voice assistant, powered by an ESP32.
+**Giving new life to a 1981 DDR rotary phone.**
 
-Pick up the handset, hear a dial tone, spin the rotary dial to call someone through your mobile phone. When a call comes in, the phone rings and you answer by lifting the handset — just like 1981, except it's going through WhatsApp.
+The vision: pick up the handset and talk to an AI. Spin the rotary dial and call someone through your mobile phone. When someone calls you, the phone rings — and you answer by lifting the handset. WhatsApp, FaceTime, regular calls, or just a conversation with Gemini. All through a phone that was made in East Germany nine years before I was born.
+
+This is a work in progress. Right now the ESP32 board inside plays a test tone through the headphone jack. That's it. But it's a start.
+
+### Built without engineering skills
+
+I'm a product manager, not a developer. I don't know C. I've never soldered anything before this project. I bought a soldering iron, a multimeter, an ESP32 board, and this old phone from Kleinanzeigen for twenty euros. I installed VS Code and Claude Code, and started describing what I wanted to build.
+
+Every line of firmware in this repo is being written through conversation — me describing what should happen, Claude writing the code, and both of us debugging when the headphones stay silent. The [project diary](DIARY.md) has the full story: the wrong codec guesses, the Wokwi simulator battles, the moment the first tone came through the headphones.
+
+If you have an old phone gathering dust and some curiosity, follow along. No CS degree required.
 
 ## Hardware
 
