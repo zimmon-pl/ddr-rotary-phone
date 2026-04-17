@@ -24,6 +24,10 @@ static const char *TAG = "bluetooth";
 
 #define BT_DEVICE_NAME "FestStefan"
 
+// Call state — mirrored from HFP CIND indicators
+static bool is_ringing = false;
+static bool is_in_call = false;
+
 // ---------------------------------------------------------------------------
 // GAP callback — handles pairing, authentication, discovery
 // ---------------------------------------------------------------------------
@@ -74,9 +78,8 @@ static void hf_incoming_data_cb(const uint8_t *buf, uint32_t len)
 
 static uint32_t hf_outgoing_data_cb(uint8_t *buf, uint32_t len)
 {
-    // Microphone data — send silence for now
-    memset(buf, 0, len);
-    return len;
+    // Handset mic PCM from I2S RX → BT stack (zero-pads on underflow)
+    return audio_read_mic_data(buf, len);
 }
 
 // ---------------------------------------------------------------------------
@@ -111,13 +114,15 @@ static void hf_client_callback(esp_hf_client_cb_event_t event, esp_hf_client_cb_
     }
 
     case ESP_HF_CLIENT_CIND_CALL_EVT:
+        is_in_call = (param->call.status != 0);
         ESP_LOGI(TAG, "Call indicator: %s",
-                 param->call.status ? "CALL IN PROGRESS" : "no call");
+                 is_in_call ? "CALL IN PROGRESS" : "no call");
         break;
 
     case ESP_HF_CLIENT_CIND_CALL_SETUP_EVT: {
         const char *setup[] = {"none", "INCOMING", "outgoing_dialing", "outgoing_alerting"};
         ESP_LOGI(TAG, "Call setup: %s", setup[param->call_setup.status]);
+        is_ringing = (param->call_setup.status == 1);  // 1 = incoming
         break;
     }
 
@@ -253,3 +258,21 @@ esp_err_t bluetooth_init(void)
     ESP_LOGI(TAG, "Bluetooth ready");
     return ESP_OK;
 }
+
+// ---------------------------------------------------------------------------
+// Public: call-control helpers driven by the hook switch
+// ---------------------------------------------------------------------------
+esp_err_t bluetooth_answer_call(void)
+{
+    ESP_LOGI(TAG, "Answering call");
+    return esp_hf_client_answer_call();
+}
+
+esp_err_t bluetooth_hangup_call(void)
+{
+    ESP_LOGI(TAG, "Hanging up");
+    return esp_hf_client_reject_call();
+}
+
+bool bluetooth_is_ringing(void) { return is_ringing; }
+bool bluetooth_is_in_call(void) { return is_in_call; }

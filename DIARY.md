@@ -204,6 +204,59 @@ Implemented HFP Voice over HCI audio path. Made an outgoing call from the Pixel 
 
 ---
 
+### 2026-04-17 — Full call loop working, mic path deferred
+
+The big one. Today the phone actually behaves like a phone: it rings when someone calls, I lift the handset to answer, I hear the caller through the earpiece, and replacing the handset hangs up. Every piece of that sentence took a separate fix, but the end result is that FestStefan works end-to-end on the listening side.
+
+**Fixed the silent earpiece.** Yesterday's call audio was technically working but inaudible — only the boot beep came through. Traced it to the volume: `audio_set_volume(60)` was writing -38 dB of digital attenuation on top of another -13 dB of analog attenuation on LOUT1VOL, for ~-51 dB total. The boot tone survives because it's played near full scale; voice samples from HFP are much quieter and got buried. Changed to `audio_set_volume(100)` (0 dB digital, full headroom) and eased LOUT1VOL from `0x15` to `0x1A`. Voice now comes through clearly.
+
+**Gave up on the microphone — for now.** Spent a while trying to wire the electret capsule I bought (Sourcing Map 6mm) through the LINEIN jack with a salvaged airline-earphones plug. Got the cable identified (blue = Tip / Left / LINPUT1, bare copper = Sleeve / GND, red ring ignored), wired it up, but the other party heard nothing. Root cause: the LINEIN jack is AC-coupled through DC-blocking capacitors, which means the ES8388's MICBIAS can't reach the electret element — and an electret needs a DC bias to work at all. Options discussed:
+
+1. MAX4466 / MAX9814 preamp module with its own bias and amplifier — cleanest path, needs 3.3V + GND + OUT (three wires from the base, one of which has to run into the handset if the preamp lives outside).
+2. Soldering directly to the MIC1/MIC2 SMD pads on the A1S board — risky, those pads are tiny, a slip destroys the board.
+3. Switching to a different ESP32 variant — ruled out: HFP requires Bluetooth Classic, and only the original ESP32 supports it. S3/C3 are BLE-only.
+
+Decision: **punt the mic.** Order a MAX4466 (or similar) breakout, mount it inside the phone base near the ESP32, run one bias/GND pair down the handset cable to the capsule, one signal wire back. For this session, leave the mic unwired and focus on everything else that doesn't need it. That "everything else" turned out to be a lot.
+
+**Hook switch integrated.** Wired St ↔ a on the RFT PCB to a GPIO and a GND line. The plan was GPIO 4, but I couldn't find IO4 on any accessible header on the A1S — switched to GPIO 23, which is on the bottom-left pin header next to GND. Software-side:
+
+- `hook_switch.c` uses a GPIO interrupt + FreeRTOS queue + debounce task (50 ms). Interrupt service routine is tiny (just enqueues a dummy event); the task does the sleep + re-read of the pin level, which avoids the `esp_timer` ISR crash pattern from earlier in the project.
+- Polarity came out inverted from what I'd coded: on this wiring, the GPIO reads LOW when the handset is lifted (St↔a closed) and HIGH when it's down (pulled up, contacts open). Flipped the level→state mapping in code rather than rewiring. Updated the comment in `hook_switch.c` to say so explicitly, so future me doesn't "fix" it back.
+- Public API: `hook_switch_init()`, `hook_switch_on_change(cb)`, `hook_switch_get_state()`. `main.c` registers a callback and routes state changes into the Bluetooth and audio layers.
+
+**Dial tone.** European dial tone is 350 Hz + 440 Hz continuous sine mix. Wrote a FreeRTOS task that generates the mixed sine in a small buffer and streams it to I2S TX in a loop while a `dial_tone_active` flag is true. `audio_start_dial_tone()` unmutes the DAC and spawns the task; `audio_stop_dial_tone()` clears the flag, waits 150 ms for the task to drain the buffer, then mutes the DAC. Both idempotent — safe to call twice.
+
+**Call control wired to the hook.** In `main.c`, the `on_hook_change` callback now does the obvious thing:
+
+- **Lift + ringing** → `bluetooth_answer_call()` (HFP AT+ATA under the hood).
+- **Lift + idle** → `audio_start_dial_tone()`.
+- **Replace** → `audio_stop_dial_tone()` (harmless if not playing), then `bluetooth_hangup_call()` if a call is in progress or ringing.
+
+To make that work, `bluetooth.c` now mirrors HFP's CIND indicators into two local flags (`is_ringing`, `is_in_call`) and exposes them via `bluetooth_is_ringing()` / `bluetooth_is_in_call()`. Call control helpers wrap `esp_hf_client_answer_call()` and `esp_hf_client_reject_call()`.
+
+**Tested the full loop.** Flashed, paired, ran it live with a real incoming call:
+
+- Boot → `Initial state: ON CRADLE`, correct.
+- Idle lift → `Handset LIFTED`, dial tone starts, DAC unmutes, audible through the handset.
+- Idle replace → `Handset REPLACED`, dial tone task ends, DAC mutes.
+- Incoming call while handset is down → `*** RING! Incoming call ***`, caller ID logged (phone number of the person who called — confirmed it was the right number).
+- Lift during ring → `Answering call`, `Audio: connected_msbc`, call audio task + mic capture task start. Heard the other party clearly through the earpiece.
+- Replace during call → `Hanging up`, audio cleanly torn down, I2S reconfigured back to 44.1 kHz, state returns to idle.
+- Ran several more lift/replace cycles afterwards — dial tone behaves correctly, nothing sticks.
+
+One aside from the log: during the very first ring cycle the remote party hung up before I lifted (reason code `0x13` = remote user ended). That's not a bug — it's just how the logs read when someone stops calling.
+
+**What's still missing / known issues:**
+
+- Mic is silent (as planned — waiting on MAX4466).
+- No visual feedback yet — LED ring not wired.
+- No rotary dial — can answer incoming calls but can't make outgoing ones from the phone.
+- Reason 0x35 "bta_dm_pm_btm_status hci_status=35" appears occasionally in the log during sniff-mode transitions — harmless, Bluetooth stack recovering from a denied low-power request.
+
+**Shift in scope.** The original plan had "use onboard MIC1/MIC2 as interim" as a fallback before the preamp arrives. Decided against it — those pads are SMD and require microsoldering. Better to wait for the MAX4466 and do it cleanly. The phone can still demonstrate one-way audio + hook control in the meantime, which is enough to show to people.
+
+---
+
 ### 2026-04-16 — Stefan arrives! Phone opened, PCB mapped
 
 Picked up the DDR RFT rotary phone from Moabit. Opened it, photographed and identified all terminals on the original RFT Serie 811 PCB. Created `WIRING.md` for the repo.
@@ -245,11 +298,11 @@ Wire colors: brown, white, green — exact mapping to NSI/NSA to be confirmed wh
 
 ## Next Steps
 
-- **Immediate:** Fix volume — reduce ES8388 output to eliminate distortion through handset speaker
-- **Then:** Solder hook switch wires (St ↔ a/b) → connect to GPIO 4
-- **Then:** Connect rotary dial (NS1/NS2/NS3) → GPIO 16/17, test pulse reading
-- **Then:** Simulation keys (KEY1-KEY6) + state machine + LED patterns
-- **V2:** WiFi + Gemini Live voice assistant
+- **Immediate:** Rotary dial — wire NS1/NS2/NS3 to GPIO 16/17 and decode pulses into digits, so outgoing calls work from the phone itself.
+- **Then:** MAX4466 (or similar) electret preamp — mount inside the base, run bias/GND + signal through the handset cable, finally close the two-way audio loop.
+- **Then:** LED ring (WS2812B) with state feedback — pulsing red for ringing, solid green for active call, breathing blue for idle/paired.
+- **Then:** Formal state machine (IDLE / RINGING / DIALING / IN_CALL) to replace the ad-hoc flag-checking in `on_hook_change`.
+- **V2:** WiFi + Gemini Live voice assistant.
 
 ---
 

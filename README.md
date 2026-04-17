@@ -4,7 +4,7 @@
 
 The vision: pick up the handset and talk to an AI. Spin the rotary dial and call someone through your mobile phone. When someone calls you, the phone rings — and you answer by lifting the handset. WhatsApp, FaceTime, regular calls, or just a conversation with Gemini. All through a phone that was made in East Germany nine years before I was born.
 
-This is a work in progress. So far the ESP32 board plays audio through the headphone jack and pairs with a phone via Bluetooth as "FestStefan". Call audio routing is next.
+This is a work in progress. So far the phone pairs with a smartphone as "FestStefan", rings on incoming calls, answers when the handset is lifted, plays the caller's voice through the original earpiece, and hangs up when the handset goes back on the cradle. Microphone path and rotary dial are next.
 
 ### Built without engineering skills
 
@@ -45,12 +45,14 @@ Replace handset ──► Call ends
 
 - [x] ES8388 codec init + I2S audio — tone test confirmed
 - [x] Bluetooth HFP pairing as "FestStefan" — connected to Pixel 8 Pro
-- [ ] Call audio routed to headphone jack
-- [ ] Simulation mode using onboard keys (KEY1-KEY6)
-- [ ] State machine: IDLE / RINGING / DIALING / IN_CALL
-- [ ] Green LED status patterns
-- [ ] Hook switch integration (GPIO 4)
+- [x] Call audio routed to handset earpiece — mSBC 16 kHz, audible end-to-end
+- [x] Hook switch integration (GPIO 23) — lift/replace detected and debounced
+- [x] Dial tone on idle lift (350 + 440 Hz sine mix through handset)
+- [x] Answer on lift + hang up on replace, driven by hook switch
+- [ ] Handset microphone — pending MAX4466 (or similar) preamp for electret bias
 - [ ] Rotary dial pulse counting (GPIO 16/17)
+- [ ] State machine: IDLE / RINGING / DIALING / IN_CALL
+- [ ] WS2812B LED ring status patterns
 
 ### Phase 2: AI Assistant
 

@@ -3,9 +3,9 @@
 // The hook switch is pressed down by the weight of the handset.
 // Lifting the handset releases the switch.
 //
-// With a pull-up resistor:
-//   Handset DOWN → switch closed → GPIO reads LOW (0)
-//   Handset UP   → switch open  → GPIO reads HIGH (1)
+// Wiring: St → GPIO (internal pull-up), a → GND.
+// On this RFT PCB the closed contact is St↔a when the handset is LIFTED,
+// so GPIO reads LOW when lifted and HIGH (pull-up) when the handset is down.
 //
 // We debounce with a 50ms delay — mechanical switches bounce a bit
 // when the handset is slammed down or picked up quickly.
@@ -23,7 +23,7 @@ static const char *TAG = "hook_switch";
 // ---------------------------------------------------------------------------
 // GPIO pin assignment — change when board arrives
 // ---------------------------------------------------------------------------
-#define HOOK_SWITCH_PIN  GPIO_NUM_4   // Free on A1S AudioKit board
+#define HOOK_SWITCH_PIN  GPIO_NUM_23  // Bottom-left header on A1S V2.2
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -62,7 +62,7 @@ static void hook_switch_task(void *arg)
             while (xQueueReceive(event_queue, &evt, 0)) {}
 
             int level = gpio_get_level(HOOK_SWITCH_PIN);
-            hook_state_t new_state = (level == 1) ? HOOK_OFF : HOOK_ON;
+            hook_state_t new_state = (level == 1) ? HOOK_ON : HOOK_OFF;
 
             if (new_state != current_state) {
                 current_state = new_state;
@@ -103,7 +103,7 @@ void hook_switch_init(void)
 
     // Read initial state
     int level = gpio_get_level(HOOK_SWITCH_PIN);
-    current_state = (level == 1) ? HOOK_OFF : HOOK_ON;
+    current_state = (level == 1) ? HOOK_ON : HOOK_OFF;
     ESP_LOGI(TAG, "Initial state: %s", (current_state == HOOK_OFF) ? "LIFTED" : "ON CRADLE");
 
     // Install ISR service if not already installed, then add our handler

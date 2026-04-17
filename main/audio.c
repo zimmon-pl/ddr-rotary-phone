@@ -43,11 +43,18 @@ static const char *TAG = "audio";
 // I2S channel handle + call audio state
 // ---------------------------------------------------------------------------
 static i2s_chan_handle_t i2s_tx_handle = NULL;
+static i2s_chan_handle_t i2s_rx_handle = NULL;
 static RingbufHandle_t call_ringbuf = NULL;
+static RingbufHandle_t mic_ringbuf  = NULL;
 static TaskHandle_t call_task_handle = NULL;
+static TaskHandle_t mic_task_handle  = NULL;
 static bool call_active = false;
 
+static bool dial_tone_active = false;
+static TaskHandle_t dial_tone_task_handle = NULL;
+
 #define CALL_RINGBUF_SIZE  4096   // ~250ms at 8kHz mono 16-bit
+#define MIC_RINGBUF_SIZE   6144   // ~200ms at 16kHz mono 16-bit
 #define CALL_TASK_STACK    4096
 
 // ---------------------------------------------------------------------------
@@ -112,18 +119,52 @@ static esp_err_t es8388_init(void)
     ret |= es8388_write_reg(0x2B, 0x80);  // DACCONTROL21: shared LRCK for ADC/DAC
     ret |= es8388_write_reg(0x2D, 0x00);  // DACCONTROL23: vroi=0
 
-    // Output volume: LOUT1/ROUT1 (headphone) at 0dB
-    ret |= es8388_write_reg(0x2E, 0x1E);  // DACCONTROL24: L1 volume = 0dB
-    ret |= es8388_write_reg(0x2F, 0x1E);  // DACCONTROL25: R1 volume = 0dB
+    // Output volume: LOUT1/ROUT1 — attenuate for small 8Ω handset speaker
+    // 0x1E = 0dB (full), 0x1A ≈ -6dB — tweak if still buzzy/too quiet
+    ret |= es8388_write_reg(0x2E, 0x1A);  // DACCONTROL24: L1 volume
+    ret |= es8388_write_reg(0x2F, 0x1A);  // DACCONTROL25: R1 volume
     ret |= es8388_write_reg(0x30, 0x00);  // DACCONTROL26: L2 volume off
     ret |= es8388_write_reg(0x31, 0x00);  // DACCONTROL27: R2 volume off
 
-    // DAC digital volume: 0dB
+    // DAC digital volume: 0dB (audio_set_volume() tweaks these at runtime)
     ret |= es8388_write_reg(0x1A, 0x00);  // DACCONTROL4: left vol = 0dB
     ret |= es8388_write_reg(0x1B, 0x00);  // DACCONTROL5: right vol = 0dB
 
-    // Power on DAC outputs (LOUT1 + ROUT1 for headphone)
+    // Power on DAC outputs (LOUT1 + ROUT1 for handset speaker)
     ret |= es8388_write_reg(0x04, 0x3C);  // DACPOWER: enable all outputs
+
+    // --- ADC / microphone input path (external handset mic on LINPUT1/RINPUT1) ---
+    // ADCPOWER (0x03): 0x00 = ADC L+R on, analog inputs on, MICBIAS on (bit2=0)
+    ret |= es8388_write_reg(0x03, 0x00);
+
+    // ADCCONTROL1 (0x09): PGA gain — [7:4]=L, [3:0]=R, each step 3dB, 0xF=24dB
+    // Carbon mic needs high gain; start at 0xBB (both 33dB via +3 step overflow)
+    // Safe max 0x88 (24dB L+R). Tune at runtime with audio_set_mic_gain().
+    ret |= es8388_write_reg(0x09, 0x88);
+
+    // ADCCONTROL2 (0x0A): LINSEL/RINSEL — 0x00 = LINPUT1/RINPUT1 (LINEIN jack)
+    // Handset carbon mic wires into the LINEIN 3.5 mm jack via an airline-
+    // earphones plug adapter: mic+ → Tip (LINPUT1), shared GND → Sleeve.
+    ret |= es8388_write_reg(0x0A, 0x00);
+
+    // ADCCONTROL3 (0x0B): DS=0 (single-ended, not differential), MONOMIX=00
+    ret |= es8388_write_reg(0x0B, 0x02);
+
+    // ADCCONTROL4 (0x0C): 16-bit I2S format
+    ret |= es8388_write_reg(0x0C, 0x0C);
+
+    // ADCCONTROL5 (0x0D): ADC MCLK/LRCK ratio = 256 (matches DAC)
+    ret |= es8388_write_reg(0x0D, 0x02);
+
+    // ADCCONTROL7 (0x0F): HPF enable, removes DC offset from carbon mic
+    ret |= es8388_write_reg(0x0F, 0x20);
+
+    // ADCCONTROL8/9 (0x10, 0x11): ADC digital volume = 0dB
+    ret |= es8388_write_reg(0x10, 0x00);
+    ret |= es8388_write_reg(0x11, 0x00);
+
+    // ADCCONTROL6 (0x0E): ADC unmute
+    ret |= es8388_write_reg(0x0E, 0x00);
 
     // Start state machine
     ret |= es8388_write_reg(0x02, 0xF0);  // CHIPPOWER: reset state machine
@@ -164,9 +205,9 @@ static void pa_enable(void)
 static esp_err_t i2s_init(void)
 {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    esp_err_t ret = i2s_new_channel(&chan_cfg, &i2s_tx_handle, NULL);
+    esp_err_t ret = i2s_new_channel(&chan_cfg, &i2s_tx_handle, &i2s_rx_handle);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create I2S channel");
+        ESP_LOGE(TAG, "Failed to create I2S channels");
         return ret;
     }
 
@@ -186,7 +227,13 @@ static esp_err_t i2s_init(void)
 
     ret = i2s_channel_init_std_mode(i2s_tx_handle, &std_cfg);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to init I2S standard mode");
+        ESP_LOGE(TAG, "Failed to init I2S TX standard mode");
+        return ret;
+    }
+
+    ret = i2s_channel_init_std_mode(i2s_rx_handle, &std_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to init I2S RX standard mode");
         return ret;
     }
 
@@ -196,7 +243,13 @@ static esp_err_t i2s_init(void)
         return ret;
     }
 
-    ESP_LOGI(TAG, "I2S initialized — %dHz, 16-bit stereo", SAMPLE_RATE);
+    ret = i2s_channel_enable(i2s_rx_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable I2S RX channel");
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "I2S initialized — %dHz 16-bit stereo, TX+RX", SAMPLE_RATE);
     return ESP_OK;
 }
 
@@ -291,6 +344,18 @@ esp_err_t audio_set_volume(uint8_t volume)
 }
 
 // ---------------------------------------------------------------------------
+// Public: set ADC/mic PGA gain (raw register value for ADCCONTROL1)
+// High nibble = left, low nibble = right, 3dB/step, 0x88 = 24dB, 0xBB = ~33dB.
+// Start high for carbon mic; lower if saturating.
+// ---------------------------------------------------------------------------
+esp_err_t audio_set_mic_gain(uint8_t gain_reg)
+{
+    esp_err_t ret = es8388_write_reg(0x09, gain_reg);
+    ESP_LOGI(TAG, "Mic PGA gain set (ADCCONTROL1=0x%02X)", gain_reg);
+    return ret;
+}
+
+// ---------------------------------------------------------------------------
 // Public: mute/unmute DAC
 // ---------------------------------------------------------------------------
 esp_err_t audio_set_mute(bool mute)
@@ -339,6 +404,64 @@ static void call_audio_task(void *arg)
 }
 
 // ---------------------------------------------------------------------------
+// Mic capture task — reads stereo PCM from I2S RX, drops right channel,
+// pushes mono into mic_ringbuf for the HFP outgoing callback
+// ---------------------------------------------------------------------------
+static void mic_capture_task(void *arg)
+{
+    ESP_LOGI(TAG, "Mic capture task started");
+    int16_t stereo_buf[256];   // 128 stereo samples per read
+    int16_t mono_buf[128];
+
+    while (call_active) {
+        size_t bytes_read = 0;
+        esp_err_t r = i2s_channel_read(i2s_rx_handle, stereo_buf,
+                                       sizeof(stereo_buf),
+                                       &bytes_read, pdMS_TO_TICKS(100));
+        if (r != ESP_OK || bytes_read == 0) continue;
+
+        size_t stereo_samples = bytes_read / 4;   // 4 bytes per stereo frame
+        for (size_t i = 0; i < stereo_samples && i < 128; i++) {
+            mono_buf[i] = stereo_buf[i * 2];      // left channel
+        }
+
+        // Non-blocking — drop samples if BT isn't draining (better than stalling)
+        xRingbufferSend(mic_ringbuf, mono_buf, stereo_samples * 2, 0);
+    }
+
+    ESP_LOGI(TAG, "Mic capture task ended");
+    vTaskDelete(NULL);
+}
+
+// ---------------------------------------------------------------------------
+// Public: pull outgoing mic data for HFP callback.
+// Must always return exactly `len` bytes — pads with zeros on underflow.
+// ---------------------------------------------------------------------------
+uint32_t audio_read_mic_data(uint8_t *buf, uint32_t len)
+{
+    if (!call_active || mic_ringbuf == NULL || len == 0) {
+        if (buf) memset(buf, 0, len);
+        return len;
+    }
+
+    uint32_t filled = 0;
+    while (filled < len) {
+        size_t item_size = 0;
+        void *item = xRingbufferReceiveUpTo(mic_ringbuf, &item_size,
+                                            0, len - filled);
+        if (item == NULL || item_size == 0) break;
+        memcpy(buf + filled, item, item_size);
+        vRingbufferReturnItem(mic_ringbuf, item);
+        filled += item_size;
+    }
+
+    if (filled < len) {
+        memset(buf + filled, 0, len - filled);
+    }
+    return len;
+}
+
+// ---------------------------------------------------------------------------
 // Public: start call audio mode
 // ---------------------------------------------------------------------------
 esp_err_t audio_start_call(uint32_t sample_rate)
@@ -347,34 +470,43 @@ esp_err_t audio_start_call(uint32_t sample_rate)
 
     ESP_LOGI(TAG, "Starting call audio at %lu Hz", sample_rate);
 
-    // Reconfigure I2S clock for voice sample rate
+    // Reconfigure I2S TX+RX clock for voice sample rate
     i2s_channel_disable(i2s_tx_handle);
+    i2s_channel_disable(i2s_rx_handle);
 
     i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
     esp_err_t ret = i2s_channel_reconfig_std_clock(i2s_tx_handle, &clk_cfg);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to reconfig I2S clock: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to reconfig TX clock: %s", esp_err_to_name(ret));
         i2s_channel_enable(i2s_tx_handle);
+        i2s_channel_enable(i2s_rx_handle);
         return ret;
+    }
+    ret = i2s_channel_reconfig_std_clock(i2s_rx_handle, &clk_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to reconfig RX clock: %s", esp_err_to_name(ret));
     }
 
     i2s_channel_enable(i2s_tx_handle);
+    i2s_channel_enable(i2s_rx_handle);
 
-    // Create ring buffer for BT → I2S data flow
+    // Create ring buffers for BT ↔ I2S data flow
     call_ringbuf = xRingbufferCreate(CALL_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
-    if (call_ringbuf == NULL) {
-        ESP_LOGE(TAG, "Failed to create call ring buffer");
+    mic_ringbuf  = xRingbufferCreate(MIC_RINGBUF_SIZE,  RINGBUF_TYPE_BYTEBUF);
+    if (call_ringbuf == NULL || mic_ringbuf == NULL) {
+        ESP_LOGE(TAG, "Failed to create call/mic ring buffers");
         return ESP_ERR_NO_MEM;
     }
 
     // Unmute DAC
     audio_set_mute(false);
 
-    // Start playback task
+    // Start playback + capture tasks
     call_active = true;
-    xTaskCreate(call_audio_task, "call_audio", CALL_TASK_STACK, NULL, 5, &call_task_handle);
+    xTaskCreate(call_audio_task,  "call_audio", CALL_TASK_STACK, NULL, 5, &call_task_handle);
+    xTaskCreate(mic_capture_task, "mic_capture", CALL_TASK_STACK, NULL, 5, &mic_task_handle);
 
-    ESP_LOGI(TAG, "Call audio started");
+    ESP_LOGI(TAG, "Call audio started (TX+RX active)");
     return ESP_OK;
 }
 
@@ -387,28 +519,33 @@ esp_err_t audio_stop_call(void)
 
     ESP_LOGI(TAG, "Stopping call audio");
 
-    // Signal task to stop
+    // Signal tasks to stop
     call_active = false;
-    if (call_task_handle) {
-        // Wait for task to exit
-        vTaskDelay(pdMS_TO_TICKS(100));
-        call_task_handle = NULL;
-    }
+    vTaskDelay(pdMS_TO_TICKS(150));   // let both tasks observe flag and exit
+    call_task_handle = NULL;
+    mic_task_handle  = NULL;
 
     // Mute DAC
     audio_set_mute(true);
 
-    // Free ring buffer
+    // Free ring buffers
     if (call_ringbuf) {
         vRingbufferDelete(call_ringbuf);
         call_ringbuf = NULL;
     }
+    if (mic_ringbuf) {
+        vRingbufferDelete(mic_ringbuf);
+        mic_ringbuf = NULL;
+    }
 
-    // Reconfigure I2S back to 44100Hz for tones
+    // Reconfigure I2S TX+RX back to 44100Hz for tones
     i2s_channel_disable(i2s_tx_handle);
+    i2s_channel_disable(i2s_rx_handle);
     i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE);
     i2s_channel_reconfig_std_clock(i2s_tx_handle, &clk_cfg);
+    i2s_channel_reconfig_std_clock(i2s_rx_handle, &clk_cfg);
     i2s_channel_enable(i2s_tx_handle);
+    i2s_channel_enable(i2s_rx_handle);
 
     ESP_LOGI(TAG, "Call audio stopped, I2S back to %d Hz", SAMPLE_RATE);
     return ESP_OK;
@@ -423,4 +560,59 @@ void audio_write_call_data(const uint8_t *data, uint32_t len)
 
     // Non-blocking write — drop data if buffer full (better than blocking BT task)
     xRingbufferSend(call_ringbuf, data, len, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Dial tone — 350 + 440 Hz sine mix, looped until stopped
+// ---------------------------------------------------------------------------
+static void dial_tone_task(void *arg)
+{
+    ESP_LOGI(TAG, "Dial tone task started");
+    int16_t buf[TONE_BUF_SAMPLES * 2];
+    float phase1 = 0.0f, phase2 = 0.0f;
+    float inc1 = 2.0f * M_PI * 350 / SAMPLE_RATE;
+    float inc2 = 2.0f * M_PI * 440 / SAMPLE_RATE;
+
+    while (dial_tone_active) {
+        for (uint32_t i = 0; i < TONE_BUF_SAMPLES; i++) {
+            int16_t s = (int16_t)((sinf(phase1) + sinf(phase2)) * (TONE_AMPLITUDE / 2));
+            buf[i * 2]     = s;
+            buf[i * 2 + 1] = s;
+            phase1 += inc1; if (phase1 >= 2.0f * M_PI) phase1 -= 2.0f * M_PI;
+            phase2 += inc2; if (phase2 >= 2.0f * M_PI) phase2 -= 2.0f * M_PI;
+        }
+        size_t written = 0;
+        i2s_channel_write(i2s_tx_handle, buf, sizeof(buf), &written,
+                          pdMS_TO_TICKS(100));
+    }
+
+    ESP_LOGI(TAG, "Dial tone task ended");
+    vTaskDelete(NULL);
+}
+
+esp_err_t audio_start_dial_tone(void)
+{
+    if (dial_tone_active) return ESP_OK;
+    if (call_active) {
+        ESP_LOGW(TAG, "Refusing to start dial tone during call");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Starting dial tone");
+    audio_set_mute(false);
+    dial_tone_active = true;
+    xTaskCreate(dial_tone_task, "dial_tone", 4096, NULL, 5, &dial_tone_task_handle);
+    return ESP_OK;
+}
+
+esp_err_t audio_stop_dial_tone(void)
+{
+    if (!dial_tone_active) return ESP_OK;
+
+    ESP_LOGI(TAG, "Stopping dial tone");
+    dial_tone_active = false;
+    vTaskDelay(pdMS_TO_TICKS(150));   // let task observe the flag and exit
+    dial_tone_task_handle = NULL;
+    audio_set_mute(true);
+    return ESP_OK;
 }
