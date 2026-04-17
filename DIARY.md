@@ -180,57 +180,75 @@ Wrote `bluetooth.c` with full HFP Hands-Free client init. Flashed, opened Blueto
 
 **Binary size:** 673KB with Bluetooth stack (was 189KB without). 36% of flash partition still free.
 
-### 2026-04-14 (evening) — Bluetooth pairing works! 
+### 2026-04-14 (late evening) — First call audio heard!
 
-Making a phone call as well. Logs below. I ran out of credits on Claude, so this is everything for today, and I could even barely hear some voice when I called someone. It was just very quiet, so we probably need to modify a little bit the volume. We can start from this next time. 
+Implemented HFP Voice over HCI audio path. Made an outgoing call from the Pixel while paired to FestStefan — **voice came through the headphones**. Audio was quiet but audible. mSBC (Wide Band Speech) negotiated automatically at 16kHz.
 
-W (170649) BT_HCI: hcif mode change: hdl 0x80, mode 0, intv 0, status 0x0
-I (170659) bluetooth: Power mode changed: 0
-I (170679) bluetooth: Call setup: outgoing_dialing
-I (170679) bluetooth: Call setup: outgoing_alerting
-I (170699) bluetooth: Audio: connected_msbc
-I (170699) audio: Starting call audio at 16000 Hz
-I (170699) audio: DAC unmuted
-I (170699) audio: Call audio started
-I (170699) audio: Call audio task started
-I (171549) bluetooth: Volume speaker: 5
-I (171699) bluetooth: Call indicator: CALL IN PROGRESS
-I (171759) bluetooth: Call setup: none
-I (176079) bluetooth: Volume speaker: 6
-I (176809) bluetooth: Volume speaker: 5
-I (176869) bluetooth: Volume speaker: 6
-I (176939) bluetooth: Volume speaker: 7
-I (176979) bluetooth: Volume speaker: 8
-I (177069) bluetooth: Volume speaker: 9
-I (177329) bluetooth: Volume speaker: 10
-I (178189) bluetooth: Volume speaker: 11
-I (178449) bluetooth: Volume speaker: 12
-I (178499) bluetooth: Volume speaker: 13
-I (178559) bluetooth: Volume speaker: 14
-I (178559) bluetooth: Volume speaker: 15
-W (185759) BT_HCI: hci cmd send: sniff: hdl 0x80, intv(400 800)
-W (185759) BT_HCI: hcif mode change: hdl 0x80, mode 0, intv 0, status 0x20
-E (185759) BT_APPL: bta_dm_pm_btm_status hci_status=32
-I (185769) bluetooth: Power mode changed: 0
-W (223769) BT_HCI: hcif disc complete: hdl 0x180, rsn 0x13 dev_find 1
-I (223769) bluetooth: Audio: disconnected
-I (223769) audio: Stopping call audio
-I (223809) audio: Call audio task ended
-I (223869) audio: DAC muted
-I (223869) audio: Call audio stopped, I2S back to 44100 Hz
-I (223869) bluetooth: Call indicator: no call
-I (224169) bluetooth: Signal strength: 5
+**What we built:**
+- Added `CONFIG_BT_HFP_AUDIO_DATA_PATH_HCI` and `CONFIG_BT_HFP_WBS_ENABLE` to sdkconfig
+- Legacy data callback (`esp_hf_client_register_data_callback`) receives decoded PCM from BT stack
+- Ring buffer between BT callback and I2S playback task (non-blocking, no BT task stalls)
+- I2S reconfigured to 8kHz (CVSD) or 16kHz (mSBC) when call connects, back to 44100Hz on disconnect
+- Mono→stereo conversion in playback task (ES8388 expects stereo I2S)
+- Outgoing audio sends silence for now (microphone not connected yet)
 
-These locks should be removed once Claude updates the diary. 
+**What the logs showed:**
+- `Audio: connected_msbc` — mSBC codec selected (16kHz, better quality than CVSD 8kHz)
+- Call audio started/stopped cleanly, I2S reconfigured back to 44100Hz after hang up
+- Volume events flowing from phone (speaker volume 5→15)
+- No crashes, no audio glitches in the short test
 
+**Issue:** Audio too quiet — need to increase ES8388 output volume registers (`LOUT1VOL`/`ROUT1VOL`) or DAC digital volume.
+
+**Binary size:** 702KB (33% of flash partition still free).
+
+---
+
+### 2026-04-16 — Stefan arrives! Phone opened, PCB mapped
+
+Picked up the DDR RFT rotary phone from Moabit. Opened it, photographed and identified all terminals on the original RFT Serie 811 PCB. Created `WIRING.md` for the repo.
+
+**PCB terminal map:**
+- **NS1/NS2/NS3** (brown/white/green) = rotary dial contacts
+- **St** = hook switch rail — terminals currently empty, need to solder new wires
+- **Mi** (teal) = microphone terminal
+- **Fe1/Fe2** (pink + white) = earpiece/speaker
+- **WK, B2, ET1/ET2/ET3, b1–b4** = bells and telephone line — leave untouched
+- **Black button (Erdtaste)** = shorts ET1↔ET3, office PBX function — unused
+
+**Hook switch — how it works:**
+Three-position switch on the St rail:
+- Handset on hook → St ↔ ET2/ET3 (bell circuit)
+- Handset lifted → St ↔ a + b (telephone line pair)
+- Black button pressed → St ↔ ET1 (earth/PBX)
+
+For ESP32: two wires from St and a/b, read as digital input on GPIO 4.
+
+**Rotary dial contacts:**
+- **NSI** (NS1/NS2) = pulse contact, normally closed, opens during return stroke
+- **NSA** (NS3) = off-normal contact, normally open, closes when dial is moved from rest
+
+Wire colors: brown, white, green — exact mapping to NSI/NSA to be confirmed when connecting to GPIO 16/17.
+
+**Handset disassembly:**
+- Original speaker: **HS-77 150Ω** — too high impedance for ESP32 codec
+- Original microphone: **FEP** carbon capsule — decision deferred, using onboard mic for now
+- Replaced speaker with new smaller 8Ω unit
+- Handset cable: 4 wires — yellow = shared GND, green/yellow = speaker, rest = microphone
+
+**First sound through the handset! ✅**
+- New speaker wired directly to LOUT+/- on ESP32 Audio Kit V2.2
+- Tone test plays through the handset speaker
+- Problem: too loud and distorting — ES8388 output overdriving the small 8Ω speaker, need to reduce LOUT1VOL/ROUT1VOL registers
 
 ---
 
 ## Next Steps
 
-- **Immediate:** Route HFP call audio to headphones — hear a real phone call
+- **Immediate:** Fix volume — reduce ES8388 output to eliminate distortion through handset speaker
+- **Then:** Solder hook switch wires (St ↔ a/b) → connect to GPIO 4
+- **Then:** Connect rotary dial (NS1/NS2/NS3) → GPIO 16/17, test pulse reading
 - **Then:** Simulation keys (KEY1-KEY6) + state machine + LED patterns
-- **Then:** Physical phone integration when it arrives (hook switch GPIO 4, rotary dial GPIO 16/17)
 - **V2:** WiFi + Gemini Live voice assistant
 
 ---
