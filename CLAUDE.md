@@ -74,18 +74,33 @@ Convert a 1981 DDR RFT rotary phone (VEB Fernmeldewerk Nordhausen, Typ 550-14012
 
 ---
 
-## File Structure
+## Current Firmware State
+
+**Single source of truth for "what works" is the Phase 1 checklist in [README.md](README.md).** Update the checkboxes there when behaviour changes — do not duplicate status in this file.
+
+**For physical/solder-level wiring** (PCB terminals, handset cable colours, hook-switch continuity, which bell terminals not to touch) see [WIRING.md](WIRING.md). Consult it before suggesting any hardware change.
+
+What a new session needs to know without greping:
+
+- State routing lives as the `on_hook_change` callback in [main/main.c](main/main.c). Lift → answer if `bluetooth_is_ringing()`, else `audio_start_dial_tone()`. Replace → stop dial tone + hangup if ringing/in-call. No separate `state_machine.c`.
+- [main/audio.c](main/audio.c) (~620 lines) owns everything audio: ES8388 init, I2S, tone playback, dial tone task, call audio RX task, mic capture TX task, volume/mute/mic-gain.
+- [main/bluetooth.c](main/bluetooth.c) (~280 lines) owns HFP: GAP, `hf_client_callback`, `hf_incoming_data_cb`/`hf_outgoing_data_cb`, plus `bluetooth_answer_call`, `bluetooth_hangup_call`, `bluetooth_is_ringing`, `bluetooth_is_in_call`.
+- [main/hook_switch.c](main/hook_switch.c) — ISR on GPIO 23 + 50ms debounce, task fires `hook_change_cb_t` callback.
+- [main/rotary_dial.c](main/rotary_dial.c) — pulse counting + 2s number-complete timer. **Module is written but NOT yet called from `main.c`** — no `rotary_dial_init()` in app_main.
+- [main/dial_actions.c](main/dial_actions.c), [main/led.c](main/led.c), [main/tones.c](main/tones.c) — 11-line stubs, just an `_init()` that logs. Real dial tone lives in `audio.c`, not `tones.c`.
+
+## File Structure (target — aspirational items still to come)
 
 ```
 main/
-├── main.c           — init, BT startup
+├── main.c           — init + hook-switch callback (state routing)
 ├── bluetooth.c      — HFP: pairing, answer, hang up, dial
-├── audio.c          — ES8388 codec config, I2S, mic/speaker
+├── audio.c          — ES8388 codec config, I2S, mic/speaker, dial tone
 ├── rotary_dial.c    — pulse counting, digit decoding, 2s timeout
-├── hook_switch.c    — lift/replace detection via GPIO
-├── dial_actions.c   — number → action routing
-├── led.c            — WS2812B ring, state machine
-└── tones.c          — dial tone generation (sine wave mix)
+├── hook_switch.c    — lift/replace detection via GPIO 23
+├── dial_actions.c   — number → action routing (stub today)
+├── led.c            — WS2812B ring state machine (stub today)
+└── tones.c          — stub; delete once we're sure nothing will move here
 ```
 
 ---
@@ -149,7 +164,7 @@ Dial `999` = factory reset / BT re-pair
 ### Our project pins
 | Signal | GPIO |
 |---|---|
-| Hook switch | 4 |
+| Hook switch | 23 |
 | Rotary dial pulse (nsi) | 16 |
 | Rotary dial off-normal (nsr) | 17 |
 | WS2812B LED ring data | TBD (22 is green LED on board — maybe use 2 or 15) |

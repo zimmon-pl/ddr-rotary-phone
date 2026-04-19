@@ -35,40 +35,43 @@ Mechanism: transparent plastic spring-loaded switch mounted centrally on PCB. Co
 | Handset lifted | `St` ↔ `a` + `b` |
 | Black button pressed | `St` ↔ `ET1` |
 
-**ESP32 connection:**
-- Pin 1 → `St`
-- Pin 2 → `a` (or `b`)
-- Logic: continuity = handset lifted → GPIO HIGH
+**ESP32 connection (confirmed working 2026-04-19):**
+- `St` → **GPIO 23** (with internal pull-up enabled in firmware)
+- `a` (or `b`) → **GND**
+- Logic: handset lifted → `St` shorts to GND → GPIO reads **LOW**. Handset down → pull-up wins → GPIO reads **HIGH**. (See [main/hook_switch.c](main/hook_switch.c) for the debouncing logic.)
 
 ---
 
 ## Rotary Dial
 
-Three wires running from dial mechanism to PCB.
+Three wires running from the dial mechanism into the phone: **green, brown, white** (confirmed visually when the phone was opened).
 
-| Terminal | Function | Wire Color |
-|----------|---------|------------|
-| `NS1` | Dial pulses (NSI) — normally closed, opens on return stroke | brown |
-| `NS2` | Second dial contact | white |
-| `NS3` | Dial active (NSA) — normally open, closes when dialing starts | green |
+| Terminal | Function | Wire Color | ESP32 pin |
+|----------|---------|------------|-----------|
+| `NS1` | Dial pulses (NSI) — normally closed, opens on return stroke | brown | **GPIO 16** |
+| `NS2` | Second dial contact | white | GND (return) |
+| `NS3` | Dial active (NSA) — normally open, closes when dialing starts | green | **GPIO 17** |
 
-Exact color-to-terminal mapping to be confirmed when reconnecting.
+Code in [main/rotary_dial.c](main/rotary_dial.c) is written (ISR + 50ms debounce + 2s number-complete timeout) but **not yet wired into `main.c` and not yet tested end-to-end on hardware** as of 2026-04-19.
 
 ---
 
 ## Handset
 
-Coiled black cable, 4 wires.
+One coiled black cable runs from the handset into the phone. Conductors:
 
 | Function | Wire Color |
 |---------|------------|
-| Shared GND | yellow |
 | Speaker (+) | green |
-| Speaker (-) | yellow (paired with green) |
-| Microphone | remaining wire(s) |
+| Shared GND (speaker return + mic return) | yellow |
+| Microphone (+) | red |
 
-Original speaker: HS-77 150Ω — replaced with smaller unit, wired to LOUT+/- on ESP32 Audio Kit V2.2.
-Original microphone: FEP carbon capsule — not connected, using onboard mic for now.
+Original speaker: HS-77 150Ω — replaced with a smaller 2W 8Ω unit.
+Original microphone: FEP carbon capsule — being replaced with an electret capsule.
+
+**Current state on the ESP32 side (2026-04-19):**
+- Speaker path: temporary direct-solder connection from the handset speaker to the board — call audio is audible end-to-end. The permanent path is 3.5mm jack → HPOUTL/HPOUTR. **Jack plugs arrive 2026-04-20**; rewire then.
+- Microphone path: **not installed yet.** Plan is electret capsule → passive bias tee (2.2kΩ + 10µF) → 3.5mm jack → LINEIN on the A1S. Bias tee components + jack plugs **arrive 2026-04-20**.
 
 ---
 
@@ -93,10 +96,10 @@ Originally used to signal office PBX switchboards. Shorts `ET1` ↔ `ET3` when p
 
 ## ESP32 Connection Summary
 
-| Function | Terminal A | Terminal B | Signal Type |
-|---------|-----------|-----------|-------------|
-| Hook switch | `St` | `a` | Digital input |
-| Dial — pulses | `NS1` | `NS2` | Digital input (pulse count) |
-| Dial — active | `NS3` | GND | Digital input |
-| Microphone | `Mi` | GND | Analog / I2S |
-| Speaker | `Fe1` | `Fe2` | PWM / I2S |
+| Function | Terminal A | Terminal B | ESP32 GPIO | Signal Type | Status |
+|---------|-----------|-----------|------------|-------------|--------|
+| Hook switch | `St` | `a` | **23** (pull-up) | Digital input | Working |
+| Dial — pulses | `NS1` | `NS2` | **16** | Digital input (pulse count) | Wired, firmware not yet active |
+| Dial — active | `NS3` | GND | **17** | Digital input | Wired, firmware not yet active |
+| Microphone | handset red wire | handset yellow (GND) | LINEIN (via bias tee + 3.5mm jack) | I2S in | Parts arrive 2026-04-20 |
+| Speaker | handset green wire | handset yellow (GND) | HPOUTL/HPOUTR via 3.5mm jack (final); temp direct-solder today | I2S out | Working (temporary wiring) |

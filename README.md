@@ -80,18 +80,20 @@ Replace handset ──► Call ends
 
 | Signal | GPIO |
 |---|---|
-| Hook switch | 4 |
+| Hook switch | 23 |
 | Rotary pulse (nsi) | 16 |
 | Rotary off-normal (nsr) | 17 |
 
-### Onboard Keys (simulation mode)
+### Onboard Keys (planned simulation mode — not yet wired in firmware)
+
+Note: KEY4 (GPIO 23) overlaps with the hook switch. When the simulation `keys.c` module is implemented, KEY4 will need a different pin or the hook switch will move.
 
 | Key | GPIO | Function |
 |---|---|---|
 | KEY1 | 36 | Simulate incoming call |
 | KEY2 | 13 | Toggle hook (lift/replace) |
 | KEY3 | 19 | Rotary pulse |
-| KEY4 | 23 | Send dialed number |
+| KEY4 | 23 | Send dialed number (⚠ conflicts with hook switch) |
 | KEY5 | 18 | Volume up |
 | KEY6 | 5 | Volume down |
 
@@ -133,19 +135,25 @@ Requires [ESP-IDF v6.0](https://docs.espressif.com/projects/esp-idf/en/v6.0/).
 
 ## Project Structure
 
+Single source of truth for "what works" is the Phase 1 checklist above.
+
 ```
 main/
-├── main.c           — app entry point, init sequence
-├── audio.c / .h     — ES8388 codec + I2S + tone generation
-├── bluetooth.c      — HFP: pairing, answer, hang up, dial
-├── hook_switch.c/.h — handset lift/replace detection
-├── rotary_dial.c/.h — pulse counting, digit decoding, timeout
-├── keys.c           — onboard button input (planned)
-├── state_machine.c  — IDLE/RING/DIAL/CALL logic (planned)
-├── led.c            — green LED status patterns
-├── dial_actions.c   — number to action routing
-└── tones.c          — dial tone generation
+├── main.c             — app entry + init sequence + hook-switch callback
+│                        (lift → answer-if-ringing else dial tone; replace → hangup)
+├── audio.c / .h       — ES8388 codec + I2S + tone playback + dial tone +
+│                        call audio task + mic capture task
+├── bluetooth.c / .h   — HFP: pairing, incoming/outgoing audio callbacks,
+│                        answer, hangup, is_ringing/is_in_call state flags
+├── hook_switch.c / .h — lift/replace detection on GPIO 23 (ISR + 50ms debounce)
+├── rotary_dial.c / .h — pulse counting + 2s number-complete timeout
+│                        (written, NOT yet wired into main.c)
+├── dial_actions.c     — stub
+├── led.c              — stub
+└── tones.c            — stub (dial tone lives in audio.c)
 ```
+
+State routing (IDLE/RINGING/DIALING/IN_CALL) currently lives as the `on_hook_change` callback in `main.c`, using `bluetooth_is_ringing()` / `bluetooth_is_in_call()` as implicit state. A dedicated `state_machine.c` can come later if the logic grows.
 
 ## References
 
