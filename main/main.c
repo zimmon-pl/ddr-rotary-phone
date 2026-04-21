@@ -48,8 +48,9 @@ void app_main(void)
     // are low-amplitude, so we need the digital headroom.
     audio_set_volume(100);
 
-    // Carbon mic needs high PGA gain — 0xBB ≈ 33 dB L+R. Tune down if saturating.
-    audio_set_mic_gain(0xBB);
+    // Electret + bias tee gives more level than the old carbon plan —
+    // start at 0x88 (24 dB L+R) and push higher only if the far end is too quiet.
+    audio_set_mic_gain(0x88);
 
     // Play a quick tone to confirm audio still works
     ESP_LOGI(TAG, "Audio check — short beep...");

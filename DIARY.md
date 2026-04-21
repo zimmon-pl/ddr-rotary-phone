@@ -296,13 +296,64 @@ Wire colors: brown, white, green — exact mapping to NSI/NSA to be confirmed wh
 
 ---
 
+### 2026-04-21 — First solder joints, bias tee built, mic diagnostic marathon
+
+Learned to solder today — first time ever touching an iron. The 80 € budget set from Amazon turned out to be fine for this. Did maybe a dozen joints over the evening. Some good, some ugly, one bad enough to become the plot twist of the day.
+
+**Built the electret mic bias tee inside the phone base:**
+- 2.2 kΩ resistor from the shared mic node to ESP32 3.3 V.
+- 10 µF electrolytic from the shared mic node to LINEIN, with + on the mic-node side and − on the LINEIN side (AC-couples the audio, blocks DC bias from reaching the codec).
+- Red wire from handset (mic +) joins the shared node.
+- Yellow wire from handset (shared GND) runs straight to an ESP32 GND pin via Dupont.
+- A mono 3.5 mm plug terminates the cap's output wire (tip = signal, sleeve = GND through the jack's internal contact).
+
+**Handset cable colours finalised (updated [WIRING.md](WIRING.md) yesterday already):**
+- Green = speaker +
+- Yellow = shared GND (speaker return + mic return)
+- Red = microphone +
+
+**Speaker status:** Already installed inside the handset since 2026-04-16, wired straight to LOUT+/− on the A1S. That's been working end-to-end through HFP calls for days — the far party's voice comes through the earpiece. So **speaker side: done**. Only the mic path is the bottleneck.
+
+**The diagnostic marathon.** Did a full BT call test after building the bias tee. Mic gain already lowered from `0xBB` (33 dB) to `0x88` (24 dB) in [main/main.c:52](main/main.c#L52) to avoid clipping the electret. Outgoing call worked, I could hear the far end clearly — but they heard absolutely nothing from me.
+
+Multimeter hour began. Methodical walk through the circuit:
+
+1. Measured DC voltage at the capsule + pin with black probe on ESP32 GND → **read 3.3 V**. That means no current was flowing, so either the capsule was wired backwards, dead, or the GND side was floating.
+2. Swap test at the bias tee wasn't practical (shared GND with the working speaker), so instead: **continuity test from ESP32 GND to the capsule − pin inside the handset** → no beep. Found it: the mic's GND solder pad was cold — even though the speaker shared the yellow wire and worked fine, the mic's − pin was floating.
+3. Re-flowed the joint. New measurement: **2.7 V at the + pin**. Not ideal (healthy electret wants ~1.5–2 V), but the capsule is now alive and drawing current.
+4. Cap sanity check: continuity across the cap → short beep then silence (cap charging through the meter, then blocking DC — healthy). Multimeter's capacitance mode confirmed 10 µF. Cap is fine.
+5. Continuity from cap output to the 3.5 mm plug tip → clean beep. Signal is routed to the right plug contact.
+
+But the far end still couldn't hear me. One more measurement I *thought* was alarming — ~2.7 V on the LINEIN side of the cap — turned out to be a false positive from my own bad test advice: I had the plug *unplugged* while probing, which means the LINEIN wire was floating, and a floating wire near a 2.7 V source just picks up phantom voltage through the multimeter's 10 MΩ input impedance. Noted for next time: **measure the AC-coupled side of a cap with the load connected, not floating.**
+
+**Bonus discovery:** KEY4 on the A1S board (GPIO 23) works as a hook-switch simulator. Pressing it during a call triggered `Handset LIFTED` / `REPLACED` events in the firmware and cleanly hung up. Useful for testing without the physical hook switch wired in.
+
+**What I'm leaving the day with:**
+- Bias tee built and physically sound.
+- Capsule is alive and biased, but bias is 2.7 V instead of the ideal 1.5–2 V — probably the re-flowed GND joint still has a bit of resistance. A cleaner joint should pull it into range.
+- Mic still silent on the far end. Could be low signal level (2.7 V bias → thinner capsule output), insufficient PGA gain, or a cap-related DC leak I haven't ruled out.
+- One measurement remaining tomorrow: re-measure DC on the LINEIN side of the cap **with the plug inserted into the LINEIN jack** — that gives a real reference instead of the floating-wire artifact from today.
+
+**Lesson learned about multimeter use:** continuity mode (power off, beep for yes/no) is the right tool for "is wire A connected to point B?" — faster and less ambiguous than chasing DC voltages. I used DC voltage for a test that should have been a continuity test and it cost us an hour. Won't make that mistake next time.
+
+**Code change today:** lowered `audio_set_mic_gain()` argument in [main/main.c:52](main/main.c#L52) from `0xBB` (≈33 dB) to `0x88` (≈24 dB) because electret + bias tee produces more output than the old carbon-mic plan. May need to walk it back up if the capsule really is producing a thin signal at 2.7 V bias.
+
+---
+
 ## Next Steps
 
-- **Immediate:** Rotary dial — wire NS1/NS2/NS3 to GPIO 16/17 and decode pulses into digits, so outgoing calls work from the phone itself.
-- **Then:** MAX4466 (or similar) electret preamp — mount inside the base, run bias/GND + signal through the handset cable, finally close the two-way audio loop.
-- **Then:** LED ring (WS2812B) with state feedback — pulsing red for ringing, solid green for active call, breathing blue for idle/paired.
-- **Then:** Formal state machine (IDLE / RINGING / DIALING / IN_CALL) to replace the ad-hoc flag-checking in `on_hook_change`.
-- **V2:** WiFi + Gemini Live voice assistant.
+**Mic debug (pick up tomorrow):**
+1. Re-measure DC on the LINEIN side of the cap **with the 3.5 mm plug inserted** into the LINEIN jack. Expected: ~0 V or ~1.5 V (codec internal bias). If still 2.7 V, there's a real DC leak bypassing the cap and I need to hunt for a solder bridge.
+2. If the cap check passes but the mic is still silent: re-flow the capsule GND joint inside the handset — aim for a cleaner connection that brings the bias voltage down from 2.7 V into the 1.5–2 V range.
+3. If bias is still high after re-flow, bump mic PGA gain back up (`0x88` → `0xBB`) in [main/main.c:52](main/main.c#L52) and retest.
+
+**After the mic is working:**
+- Rotary dial — wire NS1/NS2/NS3 to GPIO 16/17 and call `rotary_dial_init()` from `main.c` so outgoing calls can be placed from the phone itself. Module is already written and waiting.
+- Wire the permanent 3.5 mm jack for the speaker path (replace the temporary direct-solder LOUT connection).
+- LED ring (WS2812B) with state feedback — pulsing red for ringing, solid green for active call, breathing blue for idle/paired.
+- Formal state machine (IDLE / RINGING / DIALING / IN_CALL) to replace the ad-hoc flag-checking in `on_hook_change`.
+
+**V2:** WiFi + Gemini Live voice assistant.
 
 ---
 

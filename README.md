@@ -49,7 +49,7 @@ Replace handset ──► Call ends
 - [x] Hook switch integration (GPIO 23) — lift/replace detected and debounced
 - [x] Dial tone on idle lift (350 + 440 Hz sine mix through handset)
 - [x] Answer on lift + hang up on replace, driven by hook switch
-- [ ] Handset microphone — pending MAX4466 (or similar) preamp for electret bias
+- [ ] Handset microphone — electret + passive bias tee (2.2 kΩ + 10 µF) built inside the base; wired to LINEIN; capsule alive but still silent on the far end (debug in progress)
 - [ ] Rotary dial pulse counting (GPIO 16/17)
 - [ ] State machine: IDLE / RINGING / DIALING / IN_CALL
 - [ ] WS2812B LED ring status patterns
