@@ -13,6 +13,7 @@
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "audio.h"
 
 static const char *TAG = "audio";
@@ -52,6 +53,9 @@ static bool call_active = false;
 
 static bool dial_tone_active = false;
 static TaskHandle_t dial_tone_task_handle = NULL;
+
+static volatile bool mic_test_active = false;
+static TaskHandle_t mic_test_task_handle = NULL;
 
 #define CALL_RINGBUF_SIZE  4096   // ~250ms at 8kHz mono 16-bit
 #define MIC_RINGBUF_SIZE   6144   // ~200ms at 16kHz mono 16-bit
@@ -133,19 +137,24 @@ static esp_err_t es8388_init(void)
     // Power on DAC outputs (LOUT1 + ROUT1 for handset speaker)
     ret |= es8388_write_reg(0x04, 0x3C);  // DACPOWER: enable all outputs
 
-    // --- ADC / microphone input path (external handset mic on LINPUT1/RINPUT1) ---
-    // ADCPOWER (0x03): 0x00 = ADC L+R on, analog inputs on, MICBIAS on (bit2=0)
-    ret |= es8388_write_reg(0x03, 0x00);
+    // --- ADC / microphone input path (external handset mic via LINEIN jack) ---
+    // ADCPOWER (0x03): 0x09 = ADC on, LIN+RIN on, MICBIAS OFF, int1lp low-power.
+    // The A1S V2.2 hardwires onboard MIC1/MIC2 onto the same LIN2/RIN2 pins the
+    // LINEIN jack uses (known board bug, see Schatzmann 2021). Disabling MICBIAS
+    // starves the onboard electrets so they go high-impedance and stop loading
+    // down the LINEIN signal. Matches esp-adf reference driver value.
+    ret |= es8388_write_reg(0x03, 0x09);
 
     // ADCCONTROL1 (0x09): PGA gain — [7:4]=L, [3:0]=R, each step 3dB, 0xF=24dB
     // Carbon mic needs high gain; start at 0xBB (both 33dB via +3 step overflow)
     // Safe max 0x88 (24dB L+R). Tune at runtime with audio_set_mic_gain().
     ret |= es8388_write_reg(0x09, 0x88);
 
-    // ADCCONTROL2 (0x0A): LINSEL/RINSEL — 0x00 = LINPUT1/RINPUT1 (LINEIN jack)
-    // Handset carbon mic wires into the LINEIN 3.5 mm jack via an airline-
-    // earphones plug adapter: mic+ → Tip (LINPUT1), shared GND → Sleeve.
-    ret |= es8388_write_reg(0x0A, 0x00);
+    // ADCCONTROL2 (0x0A): LINSEL/RINSEL input select.
+    //   0x00 = LINPUT1/RINPUT1 (onboard MEMS mics on A1S)
+    //   0x55 = LINPUT2/RINPUT2 (3.5 mm LINEIN jack on A1S)
+    // Handset electret + bias tee plugs into the LINEIN jack, so we need 0x55.
+    ret |= es8388_write_reg(0x0A, 0x55);
 
     // ADCCONTROL3 (0x0B): DS=0 (single-ended, not differential), MONOMIX=00
     ret |= es8388_write_reg(0x0B, 0x02);
@@ -156,8 +165,10 @@ static esp_err_t es8388_init(void)
     // ADCCONTROL5 (0x0D): ADC MCLK/LRCK ratio = 256 (matches DAC)
     ret |= es8388_write_reg(0x0D, 0x02);
 
-    // ADCCONTROL7 (0x0F): HPF enable, removes DC offset from carbon mic
-    ret |= es8388_write_reg(0x0F, 0x20);
+    // ADCCONTROL7 (0x0F): match esp-adf reference driver.
+    // Bit 5 here is ADC_HPF_DIS (1 = HPF OFF); our earlier 0x20 was disabling
+    // the high-pass filter, leaving DC offset in the stream. 0x0A enables HPF.
+    ret |= es8388_write_reg(0x0F, 0x0A);
 
     // ADCCONTROL8/9 (0x10, 0x11): ADC digital volume = 0dB
     ret |= es8388_write_reg(0x10, 0x00);
@@ -459,6 +470,77 @@ uint32_t audio_read_mic_data(uint8_t *buf, uint32_t len)
         memset(buf + filled, 0, len - filled);
     }
     return len;
+}
+
+// ---------------------------------------------------------------------------
+// Mic test task — reads raw ADC samples (left channel) and logs peak + RMS
+// every ~100 ms. Use to confirm the handset mic reaches the codec without
+// going through the Bluetooth call path.
+// ---------------------------------------------------------------------------
+static void mic_test_task(void *arg)
+{
+    ESP_LOGI(TAG, "Mic test: tap / speak into the handset");
+    int16_t buf[256];   // 128 stereo frames per read
+
+    int32_t peak = 0;
+    int64_t sum_sq = 0;
+    int64_t n = 0;
+    int64_t last_log = esp_timer_get_time();
+
+    while (mic_test_active) {
+        size_t bytes_read = 0;
+        esp_err_t r = i2s_channel_read(i2s_rx_handle, buf, sizeof(buf),
+                                       &bytes_read, pdMS_TO_TICKS(100));
+        if (r != ESP_OK || bytes_read == 0) continue;
+
+        size_t stereo_frames = bytes_read / 4;
+        for (size_t i = 0; i < stereo_frames; i++) {
+            int16_t s = buf[i * 2];             // left channel = mic
+            int32_t a = s < 0 ? -s : s;
+            if (a > peak) peak = a;
+            sum_sq += (int32_t)s * s;
+            n++;
+        }
+
+        int64_t now = esp_timer_get_time();
+        if (now - last_log >= 100000 && n > 0) {
+            int32_t rms = (int32_t)sqrt((double)sum_sq / (double)n);
+            ESP_LOGI(TAG, "mic peak=%5ld rms=%5ld  (%lld samples)",
+                     (long)peak, (long)rms, n);
+            peak = 0;
+            sum_sq = 0;
+            n = 0;
+            last_log = now;
+        }
+    }
+
+    ESP_LOGI(TAG, "Mic test stopped");
+    vTaskDelete(NULL);
+}
+
+esp_err_t audio_start_mic_test(void)
+{
+    if (mic_test_active) return ESP_OK;
+    if (call_active) {
+        ESP_LOGW(TAG, "Refusing to start mic test during call");
+        return ESP_ERR_INVALID_STATE;
+    }
+    mic_test_active = true;
+    xTaskCreate(mic_test_task, "mic_test", CALL_TASK_STACK, NULL, 4,
+                &mic_test_task_handle);
+    return ESP_OK;
+}
+
+void audio_stop_mic_test(void)
+{
+    if (!mic_test_active) return;
+    mic_test_active = false;
+    mic_test_task_handle = NULL;
+}
+
+bool audio_mic_test_active(void)
+{
+    return mic_test_active;
 }
 
 // ---------------------------------------------------------------------------

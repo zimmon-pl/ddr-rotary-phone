@@ -340,15 +340,57 @@ But the far end still couldn't hear me. One more measurement I *thought* was ala
 
 ---
 
+### 2026-04-24 — The A1S mic bug, discovered the hard way
+
+Spent an entire session chasing the silent microphone through the ES8388 registers, and it ended with a hardware verdict: the A1S board is physically wired against us. The mic is fine, the bias tee is fine, the firmware is fine — the board itself shorts the LINEIN signal to ground before it ever reaches the ADC. Long day, but the answer is finally unambiguous.
+
+**Warm-up: confirmed the wiring I deferred last time.**
+- Hook switch pair on the RFT PCB: `St ↔ Et2` (continuity test with multimeter, handset on cradle).
+- Rotary dial: three wires from the dial — green, brown, white. Continuity testing: `brown ↔ green` is the pulse pair (NSI), `green ↔ white` is the off-normal pair (NSA). **Green is the common.**
+- Bias tee still reads 3.3 V on the bias side, 2.7 V on the LINEIN side. Stable. Healthy for an electret.
+
+**Built a mic test mode so I didn't have to do a real Bluetooth call every time I wanted to see if the mic worked.** Added `audio_start_mic_test()` / `audio_stop_mic_test()` in [main/audio.c](main/audio.c): reads raw ADC samples off I2S RX, computes peak + RMS over each ~100 ms window, logs the numbers. Wired it to the on-board REC button (GPIO 36) in [main/main.c](main/main.c) — one press to start, another to stop. This turned every experiment into a 15-second loop: change a register, flash, press REC, watch the numbers, repeat.
+
+**What the REC button showed me across four register tweaks.** Every run looked the same shape: ~5 seconds of silence, tap the mic, speak, blow, compare. Tracking idle baseline only, because *nothing I did made the numbers respond to my voice or a tap*:
+
+| Change | Idle RMS | Reaction to speech |
+|---|---|---|
+| Stock config (LINPUT1, MICBIAS on, HPF off) | ~1470 | none |
+| `ADCCONTROL2 = 0x55` → LINPUT2/RINPUT2 (LINEIN jack) | ~250 | none |
+| `ADCCONTROL7 = 0x0A` → HPF enabled (it wasn't, the old value `0x20` actually *disabled* it) | ~320 | none |
+| `ADCCONTROL1 = 0xFF` → PGA to max | ~317 | none (PGA clips at 0x88, no real gain above that) |
+| `ADCPOWER = 0x09` → MICBIAS off (matches esp-adf reference) | ~170 | none |
+
+Each tweak moved the idle floor but the signal itself never appeared. By the last row I had a clean, quiet baseline with no real input. That's when I gave in and searched.
+
+**The smoking gun: Phil Schatzmann's 2021 write-up on the AI Thinker AudioKit input bug.** On the A1S V2.2, the PCB *physically bridges* the ES8388 pins — the onboard MEMS mics (MIC1, MIC2) are tied via coupling caps C18 and C20 to the same LIN2/RIN2 pins used by the LINEIN jack. An external mic plugged into LINEIN doesn't sit *alongside* the onboard mics — it sits in parallel with them. The onboard mic capsules load my external signal down to nothing. No ES8388 register can un-route a copper trace. The fix is hardware: move C18 → C17 and C20 → C19, or desolder the onboard mic capsules outright.
+
+**Sanity check: the mic itself is not the problem.** Multimeter in AC millivolt mode, probes on the bias-tee output and GND. Silent → flat. Blow / tap / speak → the needle jumps. The external electret is alive, the bias tee is delivering real signal, the path is clean up to the edge of the A1S jack. Every other rotary-phone project I checked (Jouke's bakelite phone, derkorte's W48, weeBell) uses discrete audio chips — PCM5102 for DAC, WM8782 or INMP441 for ADC — specifically to avoid this class of codec-integration pain. Nobody sane uses the A1S codec for mic input on this kind of project.
+
+**What I'm leaving the day with:**
+- Mic debug loop (REC button → peak/RMS log) is a reusable tool — it'll stay in the firmware.
+- All the register changes we made are *correct* configuration for external-mic-on-LINEIN usage on this codec. They just can't overcome the board-level short.
+- The board is not lying to me, the mic is not lying to me, I was not losing my mind.
+
+**Path forward.** Three choices, in order of effort:
+1. **Desolder the two onboard MEMS mic capsules (MIC1, MIC2).** Regular iron, 10 minutes. Simplest way to unblock.
+2. **Move the SMD caps C18 → C17 and C20 → C19.** Cleanest long-term fix, but 0402 SMD rework — needs fine-pitch soldering skills.
+3. **Swap the mic path to a discrete ADC chip** (WM8782 or INMP441 breakout). Follows the well-worn path of every other rotary-phone project. Significant firmware changes. A1S stays on DAC duty, which is fine.
+
+Leaning toward option 1 as the next experiment. Everything non-mic (speaker, BT pairing, incoming call audio, hook switch, dial tone) is still solid — we didn't break anything chasing this.
+
+**Commits for this session:** REC-button mic test mode, codec re-routed to LINPUT2/RINPUT2, HPF enabled, MICBIAS off, PGA at max. [audio.h](main/audio.h) gets three new public functions. [main.c](main/main.c) gets a small polling task for GPIO 36.
+
+---
+
 ## Next Steps
 
-**Mic debug (pick up tomorrow):**
-1. Re-measure DC on the LINEIN side of the cap **with the 3.5 mm plug inserted** into the LINEIN jack. Expected: ~0 V or ~1.5 V (codec internal bias). If still 2.7 V, there's a real DC leak bypassing the cap and I need to hunt for a solder bridge.
-2. If the cap check passes but the mic is still silent: re-flow the capsule GND joint inside the handset — aim for a cleaner connection that brings the bias voltage down from 2.7 V into the 1.5–2 V range.
-3. If bias is still high after re-flow, bump mic PGA gain back up (`0x88` → `0xBB`) in [main/main.c:52](main/main.c#L52) and retest.
+**Mic (next session):**
+1. Desolder the two onboard MIC capsules on the A1S board (option 1 above). Iron, tweezers, heatgun if needed. Then re-run the REC-button mic test — expect silence to stay near 0 RMS and taps/speech to spike peaks into the thousands.
+2. If option 1 doesn't get us there: plan the discrete-ADC path. Order a WM8782 or INMP441 breakout, design the I2S routing, write a minimal codec-agnostic mic driver.
 
-**After the mic is working:**
-- Rotary dial — wire NS1/NS2/NS3 to GPIO 16/17 and call `rotary_dial_init()` from `main.c` so outgoing calls can be placed from the phone itself. Module is already written and waiting.
+**After the mic works:**
+- Rotary dial — wire brown → GPIO 16, white → GPIO 17, green → GND per today's confirmed pairings, and call `rotary_dial_init()` from `main.c`. Module is already written and waiting.
 - Wire the permanent 3.5 mm jack for the speaker path (replace the temporary direct-solder LOUT connection).
 - LED ring (WS2812B) with state feedback — pulsing red for ringing, solid green for active call, breathing blue for idle/paired.
 - Formal state machine (IDLE / RINGING / DIALING / IN_CALL) to replace the ad-hoc flag-checking in `on_hook_change`.

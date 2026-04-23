@@ -49,7 +49,7 @@ Replace handset ──► Call ends
 - [x] Hook switch integration (GPIO 23) — lift/replace detected and debounced
 - [x] Dial tone on idle lift (350 + 440 Hz sine mix through handset)
 - [x] Answer on lift + hang up on replace, driven by hook switch
-- [ ] Handset microphone — electret + passive bias tee (2.2 kΩ + 10 µF) built inside the base; wired to LINEIN; capsule alive but still silent on the far end (debug in progress)
+- [ ] Handset microphone — electret + passive bias tee confirmed alive (multimeter reads AC swing on voice/tap); blocked on the A1S V2.2 hardware bug where onboard MEMS mics share the LINEIN pins and load the external signal down. Fix requires desoldering the two onboard mic capsules or moving caps C18→C17 / C20→C19. See [DIARY.md](DIARY.md) 2026-04-24 for the full investigation.
 - [ ] Rotary dial pulse counting (GPIO 16/17)
 - [ ] State machine: IDLE / RINGING / DIALING / IN_CALL
 - [ ] WS2812B LED ring status patterns

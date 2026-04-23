@@ -42,4 +42,10 @@ esp_err_t audio_start_dial_tone(void);
 // Stop the dial tone and mute the DAC. Idempotent.
 esp_err_t audio_stop_dial_tone(void);
 
+// Mic test: reads from the ADC and logs peak/RMS levels every ~100 ms.
+// Use to verify the analog mic path without starting a Bluetooth call.
+esp_err_t audio_start_mic_test(void);
+void audio_stop_mic_test(void);
+bool audio_mic_test_active(void);
+
 #endif

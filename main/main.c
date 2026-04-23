@@ -6,12 +6,46 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "driver/gpio.h"
 #include "esp_log.h"
 #include "audio.h"
 #include "bluetooth.h"
 #include "hook_switch.h"
 
 static const char *TAG = "main";
+
+// On-board REC button — input-only pin with external pull-up, reads LOW
+// when pressed. Used as a debug trigger for the mic test task.
+#define REC_BUTTON_PIN  GPIO_NUM_36
+
+static void rec_button_task(void *arg)
+{
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << REC_BUTTON_PIN),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,     // GPIO 36 has no internal pulls
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&cfg);
+
+    int last = 1;
+    for (;;) {
+        int level = gpio_get_level(REC_BUTTON_PIN);
+        if (level == 0 && last == 1) {
+            vTaskDelay(pdMS_TO_TICKS(30));             // debounce
+            if (gpio_get_level(REC_BUTTON_PIN) == 0) {
+                if (audio_mic_test_active()) {
+                    audio_stop_mic_test();
+                } else {
+                    audio_start_mic_test();
+                }
+            }
+        }
+        last = level;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
 
 static void on_hook_change(hook_state_t state)
 {
@@ -48,9 +82,9 @@ void app_main(void)
     // are low-amplitude, so we need the digital headroom.
     audio_set_volume(100);
 
-    // Electret + bias tee gives more level than the old carbon plan —
-    // start at 0x88 (24 dB L+R) and push higher only if the far end is too quiet.
-    audio_set_mic_gain(0x88);
+    // Electret + bias tee is giving us low signal levels (~1700 peak on taps).
+    // Crank PGA to max (0xFF) to see if real speech lifts above ~320 RMS floor.
+    audio_set_mic_gain(0xFF);
 
     // Play a quick tone to confirm audio still works
     ESP_LOGI(TAG, "Audio check — short beep...");
@@ -67,6 +101,9 @@ void app_main(void)
     // Hook switch: detect lift/replace, drive call answer/hangup.
     hook_switch_init();
     hook_switch_on_change(on_hook_change);
+
+    // REC button toggles a mic-level debug log (press once to start, again to stop)
+    xTaskCreate(rec_button_task, "rec_button", 2048, NULL, 3, NULL);
 
     ESP_LOGI(TAG, "FestStefan is ready — open Bluetooth settings on your phone!");
 
