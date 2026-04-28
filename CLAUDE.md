@@ -157,7 +157,7 @@ Dial `999` = factory reset / BT re-pair
 | 3 | UART RX |
 | 5 | Headphone detect |
 | 13 | Button MODE / SD card |
-| 22 | Green LED (on board) |
+| 22 | On-board LED (red on A541) — wired by us as BT status LED in led.c |
 | 34 | SD card interrupt (input only) |
 | 36 | Button REC (input only) |
 

@@ -19,14 +19,17 @@
 #include "esp_hf_client_legacy_api.h"
 #include "bluetooth.h"
 #include "audio.h"
+#include "mic_source.h"
 
 static const char *TAG = "bluetooth";
 
 #define BT_DEVICE_NAME "FestStefan"
 
 // Call state — mirrored from HFP CIND indicators
-static bool is_ringing = false;
+static bool is_ringing = false;     // incoming ring only — drives auto-answer
 static bool is_in_call = false;
+static bool is_connected = false;   // SLC up
+static bool is_call_setup = false;  // any non-idle setup (incoming OR outgoing) — drives LED blink
 
 // ---------------------------------------------------------------------------
 // GAP callback — handles pairing, authentication, discovery
@@ -78,8 +81,9 @@ static void hf_incoming_data_cb(const uint8_t *buf, uint32_t len)
 
 static uint32_t hf_outgoing_data_cb(uint8_t *buf, uint32_t len)
 {
-    // Handset mic PCM from I2S RX → BT stack (zero-pads on underflow)
-    return audio_read_mic_data(buf, len);
+    // Active mic source (codec today, ADC1 in future) → BT stack.
+    // Zero-pads on underflow.
+    return mic_source_read(buf, len);
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +97,12 @@ static void hf_client_callback(esp_hf_client_cb_event_t event, esp_hf_client_cb_
         ESP_LOGI(TAG, "Connection: %s", states[param->conn_stat.state]);
         if (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_SLC_CONNECTED) {
             ESP_LOGI(TAG, "Service Level Connection established — ready for calls");
+            is_connected = true;
+        } else if (param->conn_stat.state == ESP_HF_CLIENT_CONNECTION_STATE_DISCONNECTED) {
+            is_connected = false;
+            is_ringing = false;
+            is_in_call = false;
+            is_call_setup = false;
         }
         break;
     }
@@ -122,7 +132,8 @@ static void hf_client_callback(esp_hf_client_cb_event_t event, esp_hf_client_cb_
     case ESP_HF_CLIENT_CIND_CALL_SETUP_EVT: {
         const char *setup[] = {"none", "INCOMING", "outgoing_dialing", "outgoing_alerting"};
         ESP_LOGI(TAG, "Call setup: %s", setup[param->call_setup.status]);
-        is_ringing = (param->call_setup.status == 1);  // 1 = incoming
+        is_ringing    = (param->call_setup.status == 1);  // 1 = incoming, drives answer-on-lift
+        is_call_setup = (param->call_setup.status != 0);  // any direction, drives LED
         break;
     }
 
@@ -274,5 +285,22 @@ esp_err_t bluetooth_hangup_call(void)
     return esp_hf_client_reject_call();
 }
 
-bool bluetooth_is_ringing(void) { return is_ringing; }
-bool bluetooth_is_in_call(void) { return is_in_call; }
+esp_err_t bluetooth_dial_number(const char *number)
+{
+    if (!is_connected) {
+        ESP_LOGW(TAG, "Dial '%s' ignored — HFP not connected", number);
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_LOGI(TAG, "Dialing %s", number);
+    return esp_hf_client_dial(number);
+}
+
+bool bluetooth_is_ringing(void)    { return is_ringing; }
+bool bluetooth_is_in_call(void)    { return is_in_call; }
+bool bluetooth_is_connected(void)  { return is_connected; }
+bool bluetooth_is_call_setup(void) { return is_call_setup; }
+
+void bluetooth_notify_outgoing_ready(void)
+{
+    esp_hf_client_outgoing_data_ready();
+}

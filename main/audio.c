@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "audio.h"
+#include "mic_source.h"
 
 static const char *TAG = "audio";
 
@@ -46,9 +47,7 @@ static const char *TAG = "audio";
 static i2s_chan_handle_t i2s_tx_handle = NULL;
 static i2s_chan_handle_t i2s_rx_handle = NULL;
 static RingbufHandle_t call_ringbuf = NULL;
-static RingbufHandle_t mic_ringbuf  = NULL;
 static TaskHandle_t call_task_handle = NULL;
-static TaskHandle_t mic_task_handle  = NULL;
 static bool call_active = false;
 
 static bool dial_tone_active = false;
@@ -58,7 +57,6 @@ static volatile bool mic_test_active = false;
 static TaskHandle_t mic_test_task_handle = NULL;
 
 #define CALL_RINGBUF_SIZE  4096   // ~250ms at 8kHz mono 16-bit
-#define MIC_RINGBUF_SIZE   6144   // ~200ms at 16kHz mono 16-bit
 #define CALL_TASK_STACK    4096
 
 // ---------------------------------------------------------------------------
@@ -137,13 +135,14 @@ static esp_err_t es8388_init(void)
     // Power on DAC outputs (LOUT1 + ROUT1 for handset speaker)
     ret |= es8388_write_reg(0x04, 0x3C);  // DACPOWER: enable all outputs
 
-    // --- ADC / microphone input path (external handset mic via LINEIN jack) ---
-    // ADCPOWER (0x03): 0x09 = ADC on, LIN+RIN on, MICBIAS OFF, int1lp low-power.
-    // The A1S V2.2 hardwires onboard MIC1/MIC2 onto the same LIN2/RIN2 pins the
-    // LINEIN jack uses (known board bug, see Schatzmann 2021). Disabling MICBIAS
-    // starves the onboard electrets so they go high-impedance and stop loading
-    // down the LINEIN signal. Matches esp-adf reference driver value.
-    ret |= es8388_write_reg(0x03, 0x09);
+    // --- ADC / microphone input path ---
+    // ADCPOWER (0x03): 0x00 = full ADC power-up with MICBIAS ON.
+    // Bench test mode: feed the unpowered onboard MIC1/MIC2 capsules so we can
+    // confirm BT mic→far-end is wired right end-to-end before doing the
+    // desolder. Once the onboard mics are removed and the external electret +
+    // bias tee is back on LINEIN, we want this back at 0x09 to stop MICBIAS
+    // from feeding back through the bias tee.
+    ret |= es8388_write_reg(0x03, 0x00);
 
     // ADCCONTROL1 (0x09): PGA gain — [7:4]=L, [3:0]=R, each step 3dB, 0xF=24dB
     // Carbon mic needs high gain; start at 0xBB (both 33dB via +3 step overflow)
@@ -151,9 +150,12 @@ static esp_err_t es8388_init(void)
     ret |= es8388_write_reg(0x09, 0x88);
 
     // ADCCONTROL2 (0x0A): LINSEL/RINSEL input select.
-    //   0x00 = LINPUT1/RINPUT1 (onboard MEMS mics on A1S)
-    //   0x55 = LINPUT2/RINPUT2 (3.5 mm LINEIN jack on A1S)
-    // Handset electret + bias tee plugs into the LINEIN jack, so we need 0x55.
+    //   0x00 = LINPUT1/RINPUT1 — confirmed empty on A541 (flat 430 RMS, no acoustic
+    //          response, see DIARY 2026-04-28)
+    //   0x55 = LINPUT2/RINPUT2 — onboard MIC1/MIC2 *and* the LINEIN jack.
+    //          Peaks of 1000-3500 confirmed responding to claps in bench test.
+    // Use LIN2: that's where signal lives. External electret via LINEIN goes
+    // here too (in parallel with onboard mics).
     ret |= es8388_write_reg(0x0A, 0x55);
 
     // ADCCONTROL3 (0x0B): DS=0 (single-ended, not differential), MONOMIX=00
@@ -415,61 +417,11 @@ static void call_audio_task(void *arg)
 }
 
 // ---------------------------------------------------------------------------
-// Mic capture task — reads stereo PCM from I2S RX, drops right channel,
-// pushes mono into mic_ringbuf for the HFP outgoing callback
+// Shared I2S RX handle — read by mic_source_codec.c during call audio
 // ---------------------------------------------------------------------------
-static void mic_capture_task(void *arg)
+i2s_chan_handle_t audio_get_i2s_rx_handle(void)
 {
-    ESP_LOGI(TAG, "Mic capture task started");
-    int16_t stereo_buf[256];   // 128 stereo samples per read
-    int16_t mono_buf[128];
-
-    while (call_active) {
-        size_t bytes_read = 0;
-        esp_err_t r = i2s_channel_read(i2s_rx_handle, stereo_buf,
-                                       sizeof(stereo_buf),
-                                       &bytes_read, pdMS_TO_TICKS(100));
-        if (r != ESP_OK || bytes_read == 0) continue;
-
-        size_t stereo_samples = bytes_read / 4;   // 4 bytes per stereo frame
-        for (size_t i = 0; i < stereo_samples && i < 128; i++) {
-            mono_buf[i] = stereo_buf[i * 2];      // left channel
-        }
-
-        // Non-blocking — drop samples if BT isn't draining (better than stalling)
-        xRingbufferSend(mic_ringbuf, mono_buf, stereo_samples * 2, 0);
-    }
-
-    ESP_LOGI(TAG, "Mic capture task ended");
-    vTaskDelete(NULL);
-}
-
-// ---------------------------------------------------------------------------
-// Public: pull outgoing mic data for HFP callback.
-// Must always return exactly `len` bytes — pads with zeros on underflow.
-// ---------------------------------------------------------------------------
-uint32_t audio_read_mic_data(uint8_t *buf, uint32_t len)
-{
-    if (!call_active || mic_ringbuf == NULL || len == 0) {
-        if (buf) memset(buf, 0, len);
-        return len;
-    }
-
-    uint32_t filled = 0;
-    while (filled < len) {
-        size_t item_size = 0;
-        void *item = xRingbufferReceiveUpTo(mic_ringbuf, &item_size,
-                                            0, len - filled);
-        if (item == NULL || item_size == 0) break;
-        memcpy(buf + filled, item, item_size);
-        vRingbufferReturnItem(mic_ringbuf, item);
-        filled += item_size;
-    }
-
-    if (filled < len) {
-        memset(buf + filled, 0, len - filled);
-    }
-    return len;
+    return i2s_rx_handle;
 }
 
 // ---------------------------------------------------------------------------
@@ -572,21 +524,24 @@ esp_err_t audio_start_call(uint32_t sample_rate)
     i2s_channel_enable(i2s_tx_handle);
     i2s_channel_enable(i2s_rx_handle);
 
-    // Create ring buffers for BT ↔ I2S data flow
+    // Speaker side ring buffer (BT → I2S)
     call_ringbuf = xRingbufferCreate(CALL_RINGBUF_SIZE, RINGBUF_TYPE_BYTEBUF);
-    mic_ringbuf  = xRingbufferCreate(MIC_RINGBUF_SIZE,  RINGBUF_TYPE_BYTEBUF);
-    if (call_ringbuf == NULL || mic_ringbuf == NULL) {
-        ESP_LOGE(TAG, "Failed to create call/mic ring buffers");
+    if (call_ringbuf == NULL) {
+        ESP_LOGE(TAG, "Failed to create call ring buffer");
         return ESP_ERR_NO_MEM;
     }
 
-    // Unmute DAC
+    // Unmute DAC, start speaker playback task
     audio_set_mute(false);
-
-    // Start playback + capture tasks
     call_active = true;
-    xTaskCreate(call_audio_task,  "call_audio", CALL_TASK_STACK, NULL, 5, &call_task_handle);
-    xTaskCreate(mic_capture_task, "mic_capture", CALL_TASK_STACK, NULL, 5, &mic_task_handle);
+    xTaskCreate(call_audio_task, "call_audio", CALL_TASK_STACK, NULL, 5,
+                &call_task_handle);
+
+    // Mic side: hand off to whichever source is active
+    esp_err_t mret = mic_source_start(sample_rate);
+    if (mret != ESP_OK) {
+        ESP_LOGW(TAG, "mic_source_start failed: %s", esp_err_to_name(mret));
+    }
 
     ESP_LOGI(TAG, "Call audio started (TX+RX active)");
     return ESP_OK;
@@ -601,23 +556,22 @@ esp_err_t audio_stop_call(void)
 
     ESP_LOGI(TAG, "Stopping call audio");
 
-    // Signal tasks to stop
+    // Stop mic side first (its task reads from the same I2S RX we're about
+    // to disable below)
+    mic_source_stop();
+
+    // Signal speaker task to stop
     call_active = false;
-    vTaskDelay(pdMS_TO_TICKS(150));   // let both tasks observe flag and exit
+    vTaskDelay(pdMS_TO_TICKS(150));   // let task observe flag and exit
     call_task_handle = NULL;
-    mic_task_handle  = NULL;
 
     // Mute DAC
     audio_set_mute(true);
 
-    // Free ring buffers
+    // Free speaker ring buffer
     if (call_ringbuf) {
         vRingbufferDelete(call_ringbuf);
         call_ringbuf = NULL;
-    }
-    if (mic_ringbuf) {
-        vRingbufferDelete(mic_ringbuf);
-        mic_ringbuf = NULL;
     }
 
     // Reconfigure I2S TX+RX back to 44100Hz for tones

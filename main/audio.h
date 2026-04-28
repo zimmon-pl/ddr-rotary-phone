@@ -4,6 +4,7 @@
 #define AUDIO_H
 
 #include "esp_err.h"
+#include "driver/i2s_std.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -32,8 +33,9 @@ esp_err_t audio_stop_call(void);
 // Write incoming call audio (mono 16-bit PCM) — called from BT task
 void audio_write_call_data(const uint8_t *data, uint32_t len);
 
-// Pull outgoing mic PCM for HFP callback; always returns `len` (zero-padded)
-uint32_t audio_read_mic_data(uint8_t *buf, uint32_t len);
+// Shared I2S RX handle. Used by mic_source_codec to read from the ES8388 ADC.
+// Valid after audio_init() returns ESP_OK.
+i2s_chan_handle_t audio_get_i2s_rx_handle(void);
 
 // Start the European dial tone (350 + 440 Hz sine mix) through the handset
 // speaker. Idempotent — safe to call when already playing.

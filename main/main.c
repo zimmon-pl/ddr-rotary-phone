@@ -11,6 +11,10 @@
 #include "audio.h"
 #include "bluetooth.h"
 #include "hook_switch.h"
+#include "led.h"
+#include "mic_source.h"
+#include "rotary_dial.h"
+#include "dial_actions.h"
 
 static const char *TAG = "main";
 
@@ -57,18 +61,36 @@ static void on_hook_change(hook_state_t state)
             audio_start_dial_tone();
         }
     } else {
-        // Handset replaced: stop dial tone (harmless if not playing) and
-        // hang up any ongoing/ringing call.
+        // Handset replaced: stop dial tone, drop any half-dialled number,
+        // and hang up any ongoing/ringing call.
         audio_stop_dial_tone();
+        rotary_dial_clear();
         if (bluetooth_is_ringing() || bluetooth_is_in_call()) {
             bluetooth_hangup_call();
         }
     }
 }
 
+// First pulse of any digit means the user has started dialling — kill the
+// dial tone so it doesn't play over the rotary clicks. Idempotent: safe to
+// call on every digit.
+static void on_digit(uint8_t digit)
+{
+    (void)digit;
+    audio_stop_dial_tone();
+}
+
 void app_main(void)
 {
     printf("\n*** FestStefan ***\n\n");
+
+    // Status LED (GPIO 22) up first so we have visible feedback during boot
+    led_init();
+
+    // Default mic source: ES8388 codec via I2S RX. Once the ADC1 path lands we
+    // can switch this line (or expose a build-time flag) without touching the
+    // BT/HFP code path.
+    mic_source_set(&mic_source_codec);
 
     // Init audio (ES8388 + I2S)
     esp_err_t ret = audio_init();
@@ -101,6 +123,12 @@ void app_main(void)
     // Hook switch: detect lift/replace, drive call answer/hangup.
     hook_switch_init();
     hook_switch_on_change(on_hook_change);
+
+    // Rotary dial: count pulses, decode digits, dial out on number-complete.
+    // Wires brown→GPIO 16 (pulse), white→GPIO 17 (off-normal), green→GND.
+    rotary_dial_init();
+    rotary_dial_on_digit(on_digit);
+    rotary_dial_on_number(dial_actions_handle_number);
 
     // REC button toggles a mic-level debug log (press once to start, again to stop)
     xTaskCreate(rec_button_task, "rec_button", 2048, NULL, 3, NULL);
