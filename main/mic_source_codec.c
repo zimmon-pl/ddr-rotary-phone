@@ -4,9 +4,10 @@
 // stereo I2S frame, we drop the right channel, push mono PCM into a ring
 // buffer, and the HFP outgoing-data callback drains it.
 //
-// On the A1S V2.2 board this path is muted by a hardware short between LINEIN
-// and the onboard MEMS mics (DIARY 2026-04-24). The code here is correct; the
-// board is the problem. mic_source_adc1 will be the alternative.
+// On A541 the LINEIN-jack→codec trace is broken (DIARY 2026-05-06). Working
+// around it by feeding the bias tee into the desoldered MIC1 footprint,
+// reaching the ADC via the original MIC1→C17→LIN1 path. ADCCONTROL2 is
+// configured for LIN1/RIN1 in audio.c.
 
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -25,6 +26,16 @@ static const char *TAG = "mic_codec";
 #define PREBUFFER_PUSHES  3      // buffer ~3 KB before nudging BT for the first time
 #define MIC_TASK_STACK    4096
 
+// Software gain on captured PCM.
+#define MIC_GAIN_SHIFT 3   // 1<<3 = 8× gain
+
+// Standard one-pole DC blocker:  y[n] = x[n] - x[n-1] + R * y[n-1].
+// Required: without it every sample saturates to INT16_MAX after the gain
+// stage because the MICBIAS path leaves a large DC offset that the codec's
+// own HPF doesn't fully remove. R = 32700/32768 ≈ 0.998 → ~5 Hz cutoff.
+#define DC_BLOCK_R_NUM 32700
+#define DC_BLOCK_R_DEN 32768
+
 static RingbufHandle_t mic_ringbuf = NULL;
 static TaskHandle_t mic_task_handle = NULL;
 static volatile bool capture_active = false;
@@ -39,6 +50,12 @@ static uint32_t bt_bytes_sent = 0;
 // until we've pushed enough chunks to keep up with the BT pull rate.
 static int prebuffer_count = 0;
 
+// DC-blocker state. File-scope (not static-in-function) so we can reset it
+// from codec_start; otherwise filter state from the previous call leaks into
+// the new call and produces a brief transient at startup.
+static int16_t dc_prev_x = 0;
+static int32_t dc_prev_y = 0;
+
 static void mic_capture_task(void *arg)
 {
     ESP_LOGI(TAG, "capture task started");
@@ -47,17 +64,38 @@ static void mic_capture_task(void *arg)
 
     i2s_chan_handle_t rx = audio_get_i2s_rx_handle();
 
+    uint32_t i2s_starve_count = 0;
     while (capture_active) {
         size_t bytes_read = 0;
         esp_err_t r = i2s_channel_read(rx, stereo_buf, sizeof(stereo_buf),
                                        &bytes_read, pdMS_TO_TICKS(100));
-        if (r != ESP_OK || bytes_read == 0) continue;
+        // Partial fill (ESP_ERR_TIMEOUT with bytes_read > 0) is normal — the
+        // BT stack pulls in 240-byte mSBC frames so I2S DMA often hands us
+        // less than a full requested chunk. Just process whatever we got.
+        if (bytes_read == 0) {
+            // Real starvation — codec/I2S not producing anything. Rare.
+            if (i2s_starve_count == 0 || (i2s_starve_count % 200) == 0) {
+                ESP_LOGW(TAG, "I2S RX starved err=%s (count=%lu)",
+                         esp_err_to_name(r), i2s_starve_count);
+            }
+            i2s_starve_count++;
+            continue;
+        }
 
         size_t stereo_samples = bytes_read / 4;
         if (stereo_samples > I2S_READ_FRAMES) stereo_samples = I2S_READ_FRAMES;
 
         for (size_t i = 0; i < stereo_samples; i++) {
-            mono_buf[i] = stereo_buf[i * 2];   // drop right channel (MIC2 is dead)
+            int16_t x = stereo_buf[i * 2];     // drop right channel
+            int32_t y = ((int32_t)x - dc_prev_x) +
+                        (dc_prev_y * DC_BLOCK_R_NUM / DC_BLOCK_R_DEN);
+            dc_prev_x = x;
+            dc_prev_y = y;
+
+            int32_t scaled = y << MIC_GAIN_SHIFT;
+            if (scaled > INT16_MAX) scaled = INT16_MAX;
+            else if (scaled < INT16_MIN) scaled = INT16_MIN;
+            mono_buf[i] = (int16_t)scaled;
         }
 
         // Non-blocking — drop samples if BT isn't draining (better than stalling)
@@ -93,6 +131,8 @@ static esp_err_t codec_start(uint32_t sample_rate)
     bt_underflows    = 0;
     bt_bytes_sent    = 0;
     prebuffer_count  = 0;
+    dc_prev_x        = 0;
+    dc_prev_y        = 0;
 
     capture_active = true;
     xTaskCreate(mic_capture_task, "mic_capture", MIC_TASK_STACK, NULL, 5,

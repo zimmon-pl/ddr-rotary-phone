@@ -196,8 +196,7 @@ void rotary_dial_init(void)
     gpio_config(&off_normal_cfg);
 
     // --- Set up interrupt handlers ---
-    // (ok if already installed by another module — will just return an error we ignore)
-    gpio_install_isr_service(0);
+    // ISR service is installed centrally in app_main; just attach our handlers
     gpio_isr_handler_add(ROTARY_PULSE_PIN, pulse_isr_handler, NULL);
     gpio_isr_handler_add(ROTARY_OFF_NORMAL_PIN, off_normal_isr_handler, NULL);
 

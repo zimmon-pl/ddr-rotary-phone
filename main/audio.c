@@ -9,7 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/ringbuf.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "driver/i2s_std.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -60,20 +60,21 @@ static TaskHandle_t mic_test_task_handle = NULL;
 #define CALL_TASK_STACK    4096
 
 // ---------------------------------------------------------------------------
-// ES8388 I2C register read/write
+// ES8388 I2C register read/write — uses the v6 i2c_master driver
 // ---------------------------------------------------------------------------
+static i2c_master_bus_handle_t i2c_bus = NULL;
+static i2c_master_dev_handle_t es8388_dev = NULL;
+
 static esp_err_t es8388_write_reg(uint8_t reg, uint8_t val)
 {
     uint8_t buf[2] = { reg, val };
-    return i2c_master_write_to_device(I2C_PORT, ES8388_ADDR, buf, 2,
-                                      pdMS_TO_TICKS(100));
+    return i2c_master_transmit(es8388_dev, buf, 2, 100);
 }
 
+__attribute__((unused))
 static esp_err_t es8388_read_reg(uint8_t reg, uint8_t *val)
 {
-    return i2c_master_write_read_device(I2C_PORT, ES8388_ADDR,
-                                        &reg, 1, val, 1,
-                                        pdMS_TO_TICKS(100));
+    return i2c_master_transmit_receive(es8388_dev, &reg, 1, val, 1, 100);
 }
 
 // ---------------------------------------------------------------------------
@@ -81,17 +82,23 @@ static esp_err_t es8388_read_reg(uint8_t reg, uint8_t *val)
 // ---------------------------------------------------------------------------
 static esp_err_t i2c_bus_init(void)
 {
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
+    i2c_master_bus_config_t bus_cfg = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .i2c_port = I2C_PORT,
         .sda_io_num = I2C_SDA,
         .scl_io_num = I2C_SCL,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_FREQ,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
     };
-    esp_err_t ret = i2c_param_config(I2C_PORT, &conf);
+    esp_err_t ret = i2c_new_master_bus(&bus_cfg, &i2c_bus);
     if (ret != ESP_OK) return ret;
-    return i2c_driver_install(I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
+
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = ES8388_ADDR,
+        .scl_speed_hz = I2C_FREQ,
+    };
+    return i2c_master_bus_add_device(i2c_bus, &dev_cfg, &es8388_dev);
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +114,15 @@ static esp_err_t es8388_init(void)
     // Basic chip config
     ret |= es8388_write_reg(0x01, 0x50);  // CONTROL2: standard power mgmt
     ret |= es8388_write_reg(0x02, 0x00);  // CHIPPOWER: all powered up
+
+    // Disable internal DLL — esp-adf reference comment says this "improves
+    // 8K sample rate" stability. mSBC at 16 kHz also benefits; we were
+    // missing these writes before, which may relate to the periodic I2S RX
+    // starvation events seen during calls.
+    ret |= es8388_write_reg(0x35, 0xA0);
+    ret |= es8388_write_reg(0x37, 0xD0);
+    ret |= es8388_write_reg(0x39, 0xD0);
+
     ret |= es8388_write_reg(0x08, 0x00);  // MASTERMODE: I2S slave (ESP32 is master)
     ret |= es8388_write_reg(0x00, 0x12);  // CONTROL1: play & record mode
 
@@ -136,12 +152,10 @@ static esp_err_t es8388_init(void)
     ret |= es8388_write_reg(0x04, 0x3C);  // DACPOWER: enable all outputs
 
     // --- ADC / microphone input path ---
-    // ADCPOWER (0x03): 0x00 = full ADC power-up with MICBIAS ON.
-    // Bench test mode: feed the unpowered onboard MIC1/MIC2 capsules so we can
-    // confirm BT mic→far-end is wired right end-to-end before doing the
-    // desolder. Once the onboard mics are removed and the external electret +
-    // bias tee is back on LINEIN, we want this back at 0x09 to stop MICBIAS
-    // from feeding back through the bias tee.
+    // ADCPOWER (0x03): 0x00 = ADC powered, MICBIAS ON.
+    // 2026-05-06 night: bias tee solder broke; MICBIAS is now the only bias
+    // source. Re-testing MICBIAS with PGA=0xBB (was 0xFF, out of spec) — the
+    // earlier saturation may have been a PGA artifact, not a MICBIAS problem.
     ret |= es8388_write_reg(0x03, 0x00);
 
     // ADCCONTROL1 (0x09): PGA gain — [7:4]=L, [3:0]=R, each step 3dB, 0xF=24dB
@@ -150,13 +164,12 @@ static esp_err_t es8388_init(void)
     ret |= es8388_write_reg(0x09, 0x88);
 
     // ADCCONTROL2 (0x0A): LINSEL/RINSEL input select.
-    //   0x00 = LINPUT1/RINPUT1 — confirmed empty on A541 (flat 430 RMS, no acoustic
-    //          response, see DIARY 2026-04-28)
-    //   0x55 = LINPUT2/RINPUT2 — onboard MIC1/MIC2 *and* the LINEIN jack.
-    //          Peaks of 1000-3500 confirmed responding to claps in bench test.
-    // Use LIN2: that's where signal lives. External electret via LINEIN goes
-    // here too (in parallel with onboard mics).
-    ret |= es8388_write_reg(0x0A, 0x55);
+    // 0x00 = LIN1/RIN1 — MIC1 footprint via C17 coupling cap.
+    // 2026-05-06: LINEIN jack→codec trace dead on this A541 (no continuity to
+    // any input pair). Bypassing by feeding the bias tee directly to the now-
+    // empty MIC1 signal pad. Acoustic response observed even on LIN3 via mux
+    // leakage; LIN1 is the proper routing for this path.
+    ret |= es8388_write_reg(0x0A, 0x00);
 
     // ADCCONTROL3 (0x0B): DS=0 (single-ended, not differential), MONOMIX=00
     ret |= es8388_write_reg(0x0B, 0x02);
@@ -503,6 +516,11 @@ esp_err_t audio_start_call(uint32_t sample_rate)
     if (call_active) return ESP_OK;
 
     ESP_LOGI(TAG, "Starting call audio at %lu Hz", sample_rate);
+
+    // Stop dial tone first — its task writes to i2s_tx_handle, and we're about
+    // to disable/reconfigure that channel. Letting them race produces thousands
+    // of "channel is not enabled" errors and corrupts I2S state.
+    audio_stop_dial_tone();
 
     // Reconfigure I2S TX+RX clock for voice sample rate
     i2s_channel_disable(i2s_tx_handle);

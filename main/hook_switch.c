@@ -106,8 +106,7 @@ void hook_switch_init(void)
     current_state = (level == 1) ? HOOK_ON : HOOK_OFF;
     ESP_LOGI(TAG, "Initial state: %s", (current_state == HOOK_OFF) ? "LIFTED" : "ON CRADLE");
 
-    // Install ISR service if not already installed, then add our handler
-    gpio_install_isr_service(0);
+    // ISR service is installed centrally in app_main; just attach our handler
     gpio_isr_handler_add(HOOK_SWITCH_PIN, hook_isr_handler, NULL);
 
     // Start processing task

@@ -87,6 +87,11 @@ void app_main(void)
     // Status LED (GPIO 22) up first so we have visible feedback during boot
     led_init();
 
+    // Install the GPIO ISR service once, centrally — multiple modules attach
+    // handlers (hook_switch, rotary_dial). Doing it here suppresses the
+    // "GPIO isr service already installed" error log emitted by the IDF.
+    gpio_install_isr_service(0);
+
     // Default mic source: ES8388 codec via I2S RX. Once the ADC1 path lands we
     // can switch this line (or expose a build-time flag) without touching the
     // BT/HFP code path.
@@ -104,9 +109,12 @@ void app_main(void)
     // are low-amplitude, so we need the digital headroom.
     audio_set_volume(100);
 
-    // Electret + bias tee is giving us low signal levels (~1700 peak on taps).
-    // Crank PGA to max (0xFF) to see if real speech lifts above ~320 RMS floor.
-    audio_set_mic_gain(0xFF);
+    // PGA gain matches esp-adf reference (audio_hal/driver/es8388.c line 313).
+    // 0xBB = both L+R PGA channels at gain code 0xB. Earlier we tried 0xFF —
+    // that's out of the documented 0x0-0x8 range and caused DC offset + non-
+    // linear distortion that no amount of software gain could clean up
+    // (DIARY 2026-05-06).
+    audio_set_mic_gain(0xBB);
 
     // Play a quick tone to confirm audio still works
     ESP_LOGI(TAG, "Audio check — short beep...");

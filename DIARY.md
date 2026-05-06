@@ -383,14 +383,65 @@ Leaning toward option 1 as the next experiment. Everything non-mic (speaker, BT 
 
 ---
 
+### 2026-05-06 — Mic actually works, after one stupid bug ate a day
+
+Came in expecting the desoldering of MIC1/MIC2 to instantly fix everything. It did not. Mic was still silent through the LINEIN jack. Spent an evening turning every knob the codec offers — input pair, MICBIAS on/off, software gain, software DC blocker — and got a working mic at the end of it, but the surprise punchline was that one bad register value had been silently breaking the analog stage the whole time.
+
+**The smoking gun: `audio_set_mic_gain(0xFF)`.** ES8388 PGA gain field is 4 bits per channel, valid for `0x0–0x8` (0–24 dB in 3 dB steps). esp-adf uses `0xBB` in its reference driver. We had `0xFF` left over from a debug session weeks ago. `0xF` per nibble is undocumented; it does not increase gain — it pushes the analog input stage into non-linear behavior with a large DC pedestal that the codec's own HPF can't remove. That meant every "no signal" / "saturated 10420" / "weird burping" symptom we'd been chasing for the day was the same root cause refusing to be fixed in software.
+
+Fixing PGA from `0xFF` → `0xBB` instantly produced clean speech: BT frame peaks of ~128 in silence, ~4400 on loud bursts. ~30 dB SNR. Telephony-quality. After we'd already tried roughly twelve different combinations of bias-tee / MICBIAS / input-pair routing.
+
+**The diagnostics that did pay off:**
+
+- **Continuity test from LINEIN tip to MIC1/MIC2 pads** (powered off): no beep. That ruled out the canonical "AudioKit input bug" topology Phil Schatzmann documented for V2.2 — A541 doesn't share the LINEIN node with the onboard mics. Two different problems on two different board revs.
+- **Continuity test from LINEIN tip to its adjacent PCB pad**: clean. So the jack itself is fine. The break is somewhere on the trace from there to whichever codec input it's supposed to reach.
+- **Touching the bias-tee plug tip directly to the MIC1 signal pad** while running the REC mic test: peaks rose 237 → 297-317 when speaking. First acoustic response we'd ever seen on this codec input. That single datapoint was the unlock — it told us that even though LINEIN was dead, the MIC1 footprint → C17 → LIN1 path was alive. The original 2-pin MEMS that sat there had used the onboard MICBIAS resistor; with the capsule desoldered, we could feed our own electret signal into that path.
+
+**The path that ended up working:**
+
+1. External electret on MIC1 footprint (signal → MIC1 signal pad, − → MIC1 GND pad). No discrete bias tee — the onboard bias resistor that biased the original MEMS now biases our electret via codec MICBIAS.
+2. `ADCCONTROL2 = 0x00` (LIN1/RIN1).
+3. `ADCPOWER = 0x00` (MICBIAS on).
+4. `ADCCONTROL1 = 0xBB` (PGA in spec — see "the smoking gun" above).
+5. Software side in `mic_source_codec.c`: one-pole DC blocker (R≈0.998, ~5 Hz cutoff) followed by 8× left-shift gain with INT16 saturation. The DC blocker is non-negotiable — without it every sample saturates to INT16_MAX after the gain stage, because the codec's own HPF doesn't fully remove the MICBIAS pedestal.
+
+The bias tee solder joint broke during the day's testing — by accident, late in the session. That accident turned out to be useful: it forced us to test the MICBIAS-bias path on its own, and that's the one that ended up cleanest. So we'll **not** rebuild the discrete bias tee. One fewer component, one fewer wire, the path the board was designed for.
+
+**Things I tried that did not help and almost convinced me of the wrong story:**
+
+- Trying LIN1 / LIN2 / LIN3 routings on the LINEIN jack. All three flat, no acoustic response. We thought this meant "the codec is broken" or "wrong input pair on this board"; really it meant "the LINEIN trace is dead, no codec config can fix that".
+- Increasing software gain to 32×. Made the noise floor worse. With PGA at `0xFF` the analog stage was already distorted — multiplying distorted signal harder doesn't recover it.
+- Switching to MICBIAS-on with PGA `0xFF`: idle peak 10420, "really loud noise from the speaker". Looked like MICBIAS was the problem; was actually the PGA.
+
+**Other small things from today:**
+
+- I2C driver migrated from legacy `driver/i2c.h` to ESP-IDF v6's `driver/i2c_master.h` (bus + device handles via `i2c_new_master_bus` / `i2c_master_bus_add_device`). Done as a side cleanup — clean compile, no behaviour change.
+- Centralised `gpio_install_isr_service(0)` in `app_main`. Removed duplicate calls from `hook_switch.c` and `rotary_dial.c`; both modules now just attach handlers. Suppresses the "ISR service already installed" warning that was cluttering boot logs.
+- Added a race fix in `audio_start_call`: stop the dial-tone task BEFORE disabling/reconfiguring I2S. Without it, the dial-tone task and the I2S reconfigure fight over `i2s_tx_handle` and produce a flood of "channel is not enabled" errors.
+- `mic_source_codec.c` got a rate-limited "I2S RX starved" log + treats partial-fill reads as normal. I2S DMA frequently hands us less than a full requested chunk because the BT stack pulls 240-byte mSBC frames at its own pace; that's expected, not an error.
+
+**State of the firmware right now (uncommitted):**
+
+PGA `0xBB`, MICBIAS on, LIN1, software DC blocker + 8× gain. The board was disconnected before the very last flash, so the binary on the board is a stale variant (no DC blocker — every sample saturates). Re-flash needed before next test. The on-disk source is the working configuration.
+
+**Next session:**
+
+1. Re-flash the on-disk firmware so the board is in the working state.
+2. Solder the capsule wires permanently to the MIC1 signal + GND pads on the board. Keep the wires short.
+3. Make a real call. Confirm intelligibility on the far end.
+4. If "weird at peaks" persists in real conversation, look at the DC blocker's transient response — could try a softer cutoff (R closer to 1.0, e.g. 0.9995) so it doesn't overshoot on sudden loud events.
+5. Once mic is locked in: rotary dial wiring (already coded but not connected), LED ring, maybe formal state machine.
+
+---
+
 ## Next Steps
 
 **Mic (next session):**
-1. Desolder the two onboard MIC capsules on the A1S board (option 1 above). Iron, tweezers, heatgun if needed. Then re-run the REC-button mic test — expect silence to stay near 0 RMS and taps/speech to spike peaks into the thousands.
-2. If option 1 doesn't get us there: plan the discrete-ADC path. Order a WM8782 or INMP441 breakout, design the I2S routing, write a minimal codec-agnostic mic driver.
+1. Solder the external electret leads permanently to the MIC1 footprint pads. Re-flash the on-disk firmware. Confirm a real call still sounds clean on the far end.
+2. If artifacts at speech peaks persist, soften the DC blocker cutoff in `mic_source_codec.c` (smaller R-distance from 1).
 
 **After the mic works:**
-- Rotary dial — wire brown → GPIO 16, white → GPIO 17, green → GND per today's confirmed pairings, and call `rotary_dial_init()` from `main.c`. Module is already written and waiting.
+- Rotary dial — wire brown → GPIO 16, white → GPIO 17, green → GND per the confirmed pairings, and call `rotary_dial_init()` from `main.c`. Module is already written.
 - Wire the permanent 3.5 mm jack for the speaker path (replace the temporary direct-solder LOUT connection).
 - LED ring (WS2812B) with state feedback — pulsing red for ringing, solid green for active call, breathing blue for idle/paired.
 - Formal state machine (IDLE / RINGING / DIALING / IN_CALL) to replace the ad-hoc flag-checking in `on_hook_change`.
