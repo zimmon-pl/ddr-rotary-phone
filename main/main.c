@@ -109,12 +109,8 @@ void app_main(void)
     // are low-amplitude, so we need the digital headroom.
     audio_set_volume(100);
 
-    // PGA gain matches esp-adf reference (audio_hal/driver/es8388.c line 313).
-    // 0xBB = both L+R PGA channels at gain code 0xB. Earlier we tried 0xFF —
-    // that's out of the documented 0x0-0x8 range and caused DC offset + non-
-    // linear distortion that no amount of software gain could clean up
-    // (DIARY 2026-05-06).
-    audio_set_mic_gain(0xBB);
+    // PGA gain is set in es8388_init() to match esp-adf reference (0xBB).
+    // Use audio_set_mic_gain() at runtime if you need to tune.
 
     // Play a quick tone to confirm audio still works
     ESP_LOGI(TAG, "Audio check — short beep...");

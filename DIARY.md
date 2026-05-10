@@ -434,14 +434,45 @@ PGA `0xBB`, MICBIAS on, LIN1, software DC blocker + 8× gain. The board was disc
 
 ---
 
+### 2026-05-10 — Found two real bugs, confirmed mic needs a hardware preamp
+
+Long, draining session. Re-soldered the red wire from the handset to the MIC1 pad as a permanent connection. Expected this would just ratify yesterday's working state. Instead the mic was completely silent on the far end. Spent the next several hours discovering two new bugs and finally confirming what the diary already suspected on 2026-04-17: this codec input + 2-pin electret combo doesn't have the SNR for usable HFP calls without a hardware preamp.
+
+**Real bug #1: ADC config init order.** Comparing our `es8388_init()` against both esp-adf reference drivers (`audio_hal/driver/es8388.c` and the newer `esp_codec_dev/device/es8388/es8388.c` — they agree exactly), I'd been writing the ADC config registers (ADCCONTROL1-5) AFTER setting `ADCPOWER`. esp-adf does the opposite: power down the ADC (`ADCPOWER = 0xFF`), write all the config registers, then power up (`ADCPOWER = 0x09` or `0x00`). When we got the order wrong the codec ended up in a state where the ADC produced stuck DC at the I2S output regardless of input — completely unresponsive to acoustic signal. Flipping our init order to match esp-adf, the codec immediately started producing real acoustic response on the REC mic test (peaks rising from ~1670 silent to ~1900-1960 on speech). Also removed our `ADCCONTROL7 = 0x0A` write entirely — esp-adf doesn't touch register `0x0F`, and our value was a guess about HPF bit polarity that may have been doing something unintended.
+
+**Real bug #2: ES8388 can wedge into a stuck digital state.** Earlier in the day, before we found bug #1, the readings were even worse — peak ~10000+, RMS ~3700, completely flat regardless of MICBIAS, regardless of whether anything was connected to LIN1, regardless of PGA setting (we tried 0x00, 0x88, 0xBB, 0xFF). Looked exactly like a damaged codec analog stage, started planning hardware replacement. **A full physical USB unplug for 30+ seconds dropped the readings to peak ~250 / RMS ~181** — the actual healthy ADC noise floor. Soft `CHIPPOWER` resets and re-flashes don't clear this state; only a real cold boot does. Worth knowing for future sessions.
+
+**The mic still doesn't work for calls though.** After both fixes, the chain reports honest numbers: REC test shows clear acoustic response (peaks 1670 → 1960), BT call frame peaks vary 700–6000+ during speech with floors of 200–300 in silence. Looks like real telephony. But the far end hears just white noise / "weird noises" — even with the DAC muted (which rules out acoustic feedback as the cause). The signal-to-noise ratio at the codec's analog input is the bottleneck: too much line/bias noise being captured along with the modest speech signal, and no amount of software gain (tried 8×, 16×, 32× across multiple test calls) recovers intelligible audio. mSBC encoding can't pull speech out of a mostly-noise signal.
+
+**Verdict:** the codec input chain is at its limit. The realistic path forward is the **MAX4466 (or MAX9814) preamp module** — ~€5 on Amazon.de. It provides clean isolated bias generation and ~100× analog gain. With OUT wired to the MIC1 signal pad (replacing the direct capsule wiring), the codec gets a strong clean signal and the rest of the chain works. This is the path the diary recommended on 2026-04-17 when we first hit the mic problem; today's debugging confirms it.
+
+**Other things from today (smaller):**
+
+- **Capsule replaced.** The original handset electret was producing no AC signal even with bias confirmed reaching it. Replaced with a fresh one from the Sourcing Map pack. The replacement worked (saw acoustic response in REC test), so the original had probably died from heat conduction during soldering or just from age.
+- **Capsule polarity check matters.** Spent some time checking which terminal was GND vs signal on the new capsule (continuity to the metal can = GND). Reversed polarity gives a JFET-reverse-biased capsule and no signal output — exactly the symptom we'd been chasing for hours.
+- **Yellow handset GND was loose** at one point and gave us a misleading "stuck high readings even with MICBIAS off" signature. Worth always checking the GND return path before drawing conclusions about the codec.
+- **Software gain in `mic_source_codec.c` ended up back at `MIC_GAIN_SHIFT = 3` (8×).** Higher values just amplify noise faster than signal at this SNR.
+- **DAC stays unmuted during calls** (reverted the diagnostic). The acoustic-feedback test was useful for what it ruled out but not a feature to keep.
+
+**State of firmware right now:** ADC init order fixed (the keeper change today), `ADCCONTROL7` write removed, PGA at `0xBB` matching esp-adf, MICBIAS on, software 8× gain + DC blocker in `mic_source_codec.c`. Calls connect cleanly, far-end audio plays through the handset speaker, hook switch / dial tone all working. Mic reaches the codec but the SNR is the unsolved bottleneck — gated on hardware preamp.
+
+**Next session:**
+
+1. Order MAX4466 (or MAX9814) breakout from Amazon.de. Wire to MIC1 footprint with OUT replacing the direct capsule connection. Should produce strong, clean signal at the codec input.
+2. Once mic works on real calls: rotary dial (already wired and code in place, just needs verification), LED ring, formal state machine.
+
+---
+
 ## Next Steps
 
-**Mic (next session):**
-1. Solder the external electret leads permanently to the MIC1 footprint pads. Re-flash the on-disk firmware. Confirm a real call still sounds clean on the far end.
-2. If artifacts at speech peaks persist, soften the DC blocker cutoff in `mic_source_codec.c` (smaller R-distance from 1).
+**Mic (next session — gated on hardware delivery):**
+1. **Order a MAX4466 or MAX9814 preamp breakout module on Amazon.de** (~€5, 1-3 day delivery).
+2. When it arrives: wire 3.3 V + GND + OUT to the existing handset wires (capsule stays in the handset; preamp lives in the phone base or external). OUT goes to the MIC1 signal pad on the A1S.
+3. Re-flash on-disk firmware (no firmware changes expected; the codec config is already correct).
+4. Real call test — far end should now hear clean speech.
 
 **After the mic works:**
-- Rotary dial — wire brown → GPIO 16, white → GPIO 17, green → GND per the confirmed pairings, and call `rotary_dial_init()` from `main.c`. Module is already written.
+- Rotary dial — module already coded and wired, just needs an end-to-end test (dial a number, confirm digits pulse out via HFP AT+ATD).
 - Wire the permanent 3.5 mm jack for the speaker path (replace the temporary direct-solder LOUT connection).
 - LED ring (WS2812B) with state feedback — pulsing red for ringing, solid green for active call, breathing blue for idle/paired.
 - Formal state machine (IDLE / RINGING / DIALING / IN_CALL) to replace the ad-hoc flag-checking in `on_hook_change`.

@@ -115,13 +115,10 @@ static esp_err_t es8388_init(void)
     ret |= es8388_write_reg(0x01, 0x50);  // CONTROL2: standard power mgmt
     ret |= es8388_write_reg(0x02, 0x00);  // CHIPPOWER: all powered up
 
-    // Disable internal DLL — esp-adf reference comment says this "improves
-    // 8K sample rate" stability. mSBC at 16 kHz also benefits; we were
-    // missing these writes before, which may relate to the periodic I2S RX
-    // starvation events seen during calls.
-    ret |= es8388_write_reg(0x35, 0xA0);
-    ret |= es8388_write_reg(0x37, 0xD0);
-    ret |= es8388_write_reg(0x39, 0xD0);
+    // (DLL disable writes 0x35/0x37/0x39 from esp-adf reference removed
+    // 2026-05-10 — they correlated with codec producing stuck DC at the I2S
+    // output regardless of input. Yesterday's working binary did not have
+    // these writes; restoring that state for now.)
 
     ret |= es8388_write_reg(0x08, 0x00);  // MASTERMODE: I2S slave (ESP32 is master)
     ret |= es8388_write_reg(0x00, 0x12);  // CONTROL1: play & record mode
@@ -152,45 +149,32 @@ static esp_err_t es8388_init(void)
     ret |= es8388_write_reg(0x04, 0x3C);  // DACPOWER: enable all outputs
 
     // --- ADC / microphone input path ---
-    // ADCPOWER (0x03): 0x00 = ADC powered, MICBIAS ON.
-    // 2026-05-06 night: bias tee solder broke; MICBIAS is now the only bias
-    // source. Re-testing MICBIAS with PGA=0xBB (was 0xFF, out of spec) — the
-    // earlier saturation may have been a PGA artifact, not a MICBIAS problem.
-    ret |= es8388_write_reg(0x03, 0x00);
+    // Init order matches esp-adf reference exactly (audio_hal/driver/es8388.c
+    // and esp_codec_dev/device/es8388/es8388.c are identical here):
+    //   1. Power DOWN ADC (0xFF) so config registers latch cleanly
+    //   2. Write all ADC config registers (1-5) and digital volumes (8/9)
+    //   3. Power UP ADC (0x09 = MICBIAS off, or 0x00 = MICBIAS on)
+    // Previously we did the reverse (power on, then config) — this seems to
+    // leave the ADC in a state that produces stuck output regardless of input
+    // (DIARY 2026-05-10).
+    // ADCCONTROL7 (0x0F) intentionally NOT written — esp-adf leaves it at
+    // chip default. Our earlier write of 0x0A was a guess about HPF and may
+    // have been putting the ADC into an unintended mode.
 
-    // ADCCONTROL1 (0x09): PGA gain — [7:4]=L, [3:0]=R, each step 3dB, 0xF=24dB
-    // Carbon mic needs high gain; start at 0xBB (both 33dB via +3 step overflow)
-    // Safe max 0x88 (24dB L+R). Tune at runtime with audio_set_mic_gain().
-    ret |= es8388_write_reg(0x09, 0x88);
+    ret |= es8388_write_reg(0x03, 0xFF);  // ADCPOWER: power DOWN ADC
 
-    // ADCCONTROL2 (0x0A): LINSEL/RINSEL input select.
-    // 0x00 = LIN1/RIN1 — MIC1 footprint via C17 coupling cap.
-    // 2026-05-06: LINEIN jack→codec trace dead on this A541 (no continuity to
-    // any input pair). Bypassing by feeding the bias tee directly to the now-
-    // empty MIC1 signal pad. Acoustic response observed even on LIN3 via mux
-    // leakage; LIN1 is the proper routing for this path.
-    ret |= es8388_write_reg(0x0A, 0x00);
+    ret |= es8388_write_reg(0x09, 0xBB);  // ADCCONTROL1: PGA gain (esp-adf default)
+    ret |= es8388_write_reg(0x0A, 0x00);  // ADCCONTROL2: LIN1/RIN1 (MIC1 footprint via C17)
+    ret |= es8388_write_reg(0x0B, 0x02);  // ADCCONTROL3
+    ret |= es8388_write_reg(0x0C, 0x0C);  // ADCCONTROL4: 16-bit I2S
+    ret |= es8388_write_reg(0x0D, 0x02);  // ADCCONTROL5: MCLK/LRCK = 256
 
-    // ADCCONTROL3 (0x0B): DS=0 (single-ended, not differential), MONOMIX=00
-    ret |= es8388_write_reg(0x0B, 0x02);
+    ret |= es8388_write_reg(0x10, 0x00);  // ADCCONTROL8: digital vol = 0 dB
+    ret |= es8388_write_reg(0x11, 0x00);  // ADCCONTROL9: digital vol = 0 dB
 
-    // ADCCONTROL4 (0x0C): 16-bit I2S format
-    ret |= es8388_write_reg(0x0C, 0x0C);
+    ret |= es8388_write_reg(0x0E, 0x00);  // ADCCONTROL6: ADC unmute
 
-    // ADCCONTROL5 (0x0D): ADC MCLK/LRCK ratio = 256 (matches DAC)
-    ret |= es8388_write_reg(0x0D, 0x02);
-
-    // ADCCONTROL7 (0x0F): match esp-adf reference driver.
-    // Bit 5 here is ADC_HPF_DIS (1 = HPF OFF); our earlier 0x20 was disabling
-    // the high-pass filter, leaving DC offset in the stream. 0x0A enables HPF.
-    ret |= es8388_write_reg(0x0F, 0x0A);
-
-    // ADCCONTROL8/9 (0x10, 0x11): ADC digital volume = 0dB
-    ret |= es8388_write_reg(0x10, 0x00);
-    ret |= es8388_write_reg(0x11, 0x00);
-
-    // ADCCONTROL6 (0x0E): ADC unmute
-    ret |= es8388_write_reg(0x0E, 0x00);
+    ret |= es8388_write_reg(0x03, 0x00);  // ADCPOWER: power UP ADC, MICBIAS ON
 
     // Start state machine
     ret |= es8388_write_reg(0x02, 0xF0);  // CHIPPOWER: reset state machine
