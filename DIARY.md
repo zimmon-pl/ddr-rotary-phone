@@ -463,13 +463,53 @@ Long, draining session. Re-soldered the red wire from the handset to the MIC1 pa
 
 ---
 
+### 2026-05-11 — Lost a full day; finally proved the issue is analog, not software
+
+Second day chasing the mic problem. Today the strategy was a full firmware audit: read every line of the audio path, compare against the ES8388 datasheet and both esp-adf reference drivers, verify the math in every step (DC blocker IIR, gain saturation, buffer sizes, channel extraction). All of it correct. No bugs in our code.
+
+We also re-tested every plausible firmware change. None of it helped:
+
+- MIC1 vs MIC2 routing (ADCCONTROL2 = 0x00 vs 0x55). MIC2 has a cleaner baseline (~217 RMS vs ~1420), suggesting different on-board paths. But BT calls still produced unintelligible noise on the far end. Proved nothing about MIC1 was damaged.
+- Reverted yesterday's init order fix back to the 2026-05-06 style (power-on → config) just in case yesterday's "fix" was a misattribution of the wedged-state recovery. The codec wedged into the stuck-DC state again, then a cold boot cleared it. After cold boot, REC test still didn't show acoustic response on the reverted init. BT calls still produced noise. Reverted back to the 9fb9ee4 esp-adf-style init for the day's end state — it's the safer of the two (reference-matched, recommended power sequencing).
+- Tried a fresh capsule from the Sourcing Map pack after the previous one became unresponsive. Same noise problem.
+- Yellow GND on the capsule was loose at one point; fixing it changed the DC baseline meaningfully but did not produce intelligible speech.
+
+**The diagnostic that ended the day.** Set `DACCONTROL17 bit 6` and `DACCONTROL20 bit 6` (LI2LO / RI2RO bypass — routes LIN1/RIN1 analog-direct through the codec's mixer to LOUT1/ROUT1). This bypasses all software, BT, mSBC — you hear what the codec ADC is actually capturing, in real time, in the handset speaker. Skipped the boot-time DAC mute so the bypass would be audible.
+
+Result: low-frequency white noise. Zero acoustic response when speaking into the mouthpiece. **Then disconnected the mic wire from MIC1 pad entirely — the noise was still there.** So the noise is being generated *inside* the codec or on the board (MICBIAS rail noise, codec analog stage noise floor, supply ripple) — not picked up by the handset cable. The unamplified electret signal cannot rise above this noise floor.
+
+This is the definitive answer. **Software is innocent. The codec's analog input does not have the SNR margin for an unamplified electret on this board, with our bias network.** Two days of register tweaks, init order experiments, gain stages, DC blockers, MIC1/MIC2 swaps, capsule replacements — all chasing a problem that lives in the analog domain, before any digital sample exists.
+
+We should have done the LIN→LOUT loopback on day 1 of mic debug. Saved in `feedback_codec_loopback_test.md` so future sessions reach for it first.
+
+**The path forward is unchanged from yesterday's conclusion** — preamp at the capsule end. Amplify mV-level mic signal to 100s of mV before it reaches the long handset cable and the noisy codec input. The user correctly flagged that both MAX4466 and MAX9814 breakouts ship with onboard capsules; either we desolder those and wire our handset electret to those pads, or find a less-common preamp module that takes an external mic input. Either is a real next-session task; can't do it in firmware.
+
+**What stayed clean today:**
+
+- The `9fb9ee4` codec init from yesterday matches esp-adf reference exactly. That's the canonical state to build on once the preamp arrives.
+- All other firmware (BT, HFP, hook switch, dial tone, rotary dial, LED) still works.
+- DAC path is fine — incoming voice plays through the handset speaker clearly.
+
+**State of firmware:** at `9fb9ee4` HEAD. No uncommitted changes.
+
+**Next session — hardware, not firmware:**
+
+1. Order MAX4466 or MAX9814 preamp module from Amazon.de. ~€5, 1-3 day delivery.
+2. On arrival: desolder the onboard mic capsule from the module, wire the handset's existing red/yellow leads to those pads. Mount the preamp inside the phone base.
+3. Preamp OUT → MIC1 signal pad on the A1S. Preamp Vcc/GND → 3.3 V / GND on the A1S.
+4. Disable codec MICBIAS in firmware (`ADCPOWER = 0x09` instead of `0x00`) — the preamp provides its own bias now.
+5. Real call test. Expect: clean intelligible speech on the far end.
+
+---
+
 ## Next Steps
 
 **Mic (next session — gated on hardware delivery):**
 1. **Order a MAX4466 or MAX9814 preamp breakout module on Amazon.de** (~€5, 1-3 day delivery).
-2. When it arrives: wire 3.3 V + GND + OUT to the existing handset wires (capsule stays in the handset; preamp lives in the phone base or external). OUT goes to the MIC1 signal pad on the A1S.
-3. Re-flash on-disk firmware (no firmware changes expected; the codec config is already correct).
-4. Real call test — far end should now hear clean speech.
+2. On arrival: desolder the onboard mic capsule from the module, wire the handset's existing red/yellow leads to those pads. Mount the preamp inside the phone base.
+3. Preamp OUT → MIC1 signal pad on the A1S. Preamp Vcc/GND → 3.3 V / GND on the A1S.
+4. Disable codec MICBIAS in firmware (`ADCPOWER = 0x09` instead of `0x00`) — the preamp provides its own bias now.
+5. Real call test — far end should now hear clean speech.
 
 **After the mic works:**
 - Rotary dial — module already coded and wired, just needs an end-to-end test (dial a number, confirm digits pulse out via HFP AT+ATD).
