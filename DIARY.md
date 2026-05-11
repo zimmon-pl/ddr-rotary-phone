@@ -492,6 +492,8 @@ We should have done the LIN→LOUT loopback on day 1 of mic debug. Saved in `fee
 
 **State of firmware:** at `9fb9ee4` HEAD. No uncommitted changes.
 
+**2026-05-11 (late, second pass):** went back through git history and found that the 2026-04-17 commit (`802f7d1`) had `ADCCONTROL1 = 0x88` (in-spec) and `ADCCONTROL7 = 0x20` — different from yesterday's `0xBB` PGA and missing-`ADCCONTROL7` config. Tested with those values. REC test showed acoustic response in RMS (silence ~1316 → speech ~1469, sustained for ~3.5 seconds of speaking) — better SNR signature than `0xBB`'s peak-rise pattern. BT call still produced unintelligible audio on the echo test. Setting kept on disk as the new canonical project values — in-spec PGA, hand-picked `ADCCONTROL7`, lower internal noise floor. If a preamp ever arrives, this is the cleanest analog stage configuration to build on.
+
 **Next session — hardware, not firmware:**
 
 1. Order MAX4466 or MAX9814 preamp module from Amazon.de. ~€5, 1-3 day delivery.

@@ -163,11 +163,19 @@ static esp_err_t es8388_init(void)
 
     ret |= es8388_write_reg(0x03, 0xFF);  // ADCPOWER: power DOWN ADC
 
-    ret |= es8388_write_reg(0x09, 0xBB);  // ADCCONTROL1: PGA gain (esp-adf default)
+    // 2026-05-11 night: trying the 2026-04-17 ADC values (commit 802f7d1).
+    // PGA at 0x88 (datasheet-documented 24 dB max, in-spec) vs the later
+    // 0xBB drift — less analog gain amplifying the codec's internal noise
+    // floor, potentially better SNR even if absolute level is quieter.
+    // ADCCONTROL7 = 0x20 restored from 2026-04-17 — specific bit pattern
+    // hand-picked when the project was working; bit 6 differs from chip
+    // default (0x60) and may control ADC soft-ramp/mute behavior.
+    ret |= es8388_write_reg(0x09, 0x88);  // ADCCONTROL1: PGA gain (24 dB, in spec)
     ret |= es8388_write_reg(0x0A, 0x00);  // ADCCONTROL2: LIN1/RIN1 (MIC1 footprint via C17)
     ret |= es8388_write_reg(0x0B, 0x02);  // ADCCONTROL3
     ret |= es8388_write_reg(0x0C, 0x0C);  // ADCCONTROL4: 16-bit I2S
     ret |= es8388_write_reg(0x0D, 0x02);  // ADCCONTROL5: MCLK/LRCK = 256
+    ret |= es8388_write_reg(0x0F, 0x20);  // ADCCONTROL7: as written 2026-04-17
 
     ret |= es8388_write_reg(0x10, 0x00);  // ADCCONTROL8: digital vol = 0 dB
     ret |= es8388_write_reg(0x11, 0x00);  // ADCCONTROL9: digital vol = 0 dB
