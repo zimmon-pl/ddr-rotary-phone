@@ -27,7 +27,7 @@ static const char *TAG = "mic_codec";
 #define MIC_TASK_STACK    4096
 
 // Software gain on captured PCM.
-#define MIC_GAIN_SHIFT 3   // 1<<3 = 8× gain
+#define MIC_GAIN_SHIFT 0   // 1× (no software gain). MAX9814 + codec PGA 12 dB carry all the gain; software boost was clipping mSBC encoder.
 
 // Standard one-pole DC blocker:  y[n] = x[n] - x[n-1] + R * y[n-1].
 // Required: without it every sample saturates to INT16_MAX after the gain

@@ -150,6 +150,11 @@ static void hf_client_callback(esp_hf_client_cb_event_t event, esp_hf_client_cb_
         ESP_LOGI(TAG, "Volume %s: %d",
                  param->volume_control.type == ESP_HF_VOLUME_CONTROL_TARGET_SPK ? "speaker" : "mic",
                  param->volume_control.volume);
+        if (param->volume_control.type == ESP_HF_VOLUME_CONTROL_TARGET_SPK) {
+            audio_set_lout_volume(param->volume_control.volume);
+        }
+        // mic-gain index (TARGET_MIC) is informational only — there's no
+        // analog mic gain stage on the phone side; we ignore it.
         break;
 
     case ESP_HF_CLIENT_CIND_SERVICE_AVAILABILITY_EVT:

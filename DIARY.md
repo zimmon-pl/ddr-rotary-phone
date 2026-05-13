@@ -504,16 +504,48 @@ We should have done the LIN→LOUT loopback on day 1 of mic debug. Saved in `fee
 
 ---
 
+### 2026-05-13 — Mic finally works end-to-end on a real call
+
+Day-long session. The MAX9814 arrived. Wired it up per yesterday's plan, then spent most of the day discovering that **two firmware assumptions in the previous diary entries were wrong**, both of which had to be fixed before the mic produced any signal on the actual codec. Once those were corrected, made a real phone call and the recipient said "I can hear you loud and clear even though you're not speaking directly into the mic."
+
+**The two bugs that mattered, both introduced or re-introduced on 2026-05-11's late-night second pass:**
+
+1. **`ADCCONTROL7 = 0x20` was silently muting the ADC.** Writing this register at all turns the codec into a stuck-DC generator: every sample comes out as a near-constant value, peak ≈ RMS, totally unresponsive to acoustic input. esp-adf's reference drivers never touch this register — and that's intentional. We had it as `0x0A` (guess about HPF), then removed it on 2026-05-10's good fix, then reverted to `0x20` on 2026-05-11's late session "matching the working 2026-04-17 commit." That revert was the bug. Removed for good today. Default `0x60` works.
+2. **The "MIC1" silkscreen pad does not route to codec LIN1.** It routes to **LIN2**. The diary's 2026-05-11 entry asserted "MIC1 vs MIC2 routing (ADCCONTROL2 = 0x00 vs 0x55)" but the mapping was never verified — and was based on testing while the ADC was wedged by bug #1. With bug #1 fixed, switching `ADCCONTROL2` from `0x00` (LIN1) to `0x50` (LIN2, the canonical esp-adf value for LINPUT2_RINPUT2) immediately produced saturated mic capture. Matches Phil Schatzmann's V2.2 documentation we'd previously discounted: onboard MIC footprints are tied to LIN2/RIN2 via C17/C19.
+
+**The "MAX9814 isn't working" diagnostic spiral.** Spent two hours convinced the preamp was dead because the codec was outputting peak≈RMS=1420 LSB constant DC regardless of input. Tried disconnecting MAX9814, scratching the capsule, testing finger-on-MIC1, doing the LIN→LOUT analog loopback test. Everything looked broken because everything WAS broken — at the codec, not the preamp. The MAX9814 had been outputting good signal the whole time; the codec just wasn't capturing it. The unlock was switching `ADCCONTROL2` to LIN2 as a sanity check — saw the codec immediately saturate on ambient sound (because the powered MAX9814 right next door was bleeding through), which proved (a) the codec ADC was healthy, (b) something specific to the LIN1 channel selection was broken. Working back from there isolated the two bugs above.
+
+**Working final config (committed):**
+- MAX9814 preamp powered from A1S 3.3 V / GND, OUT → "MIC1" silkscreen pad. GAIN and A/R pins floating (60 dB AGC, 1:4000 release).
+- Handset capsule wired to the MAX9814 breakout's C+/C− pads (where its onboard mic used to be). Red = signal, yellow = GND.
+- `ADCCONTROL2 = 0x50` (LIN2/RIN2 — the channel the MIC1 footprint actually reaches).
+- `ADCCONTROL1 = 0x44` (PGA 12 dB — found empirically; 24 dB drives the codec into wedge episodes from cable-bump transients).
+- `ADCCONTROL7` **not written** (chip default 0x60).
+- `ADCPOWER = 0x00` (MICBIAS on — even with preamp; turning it off lets the MIC1 footprint's bias resistor pull MAX9814 OUT toward GND).
+- Software gain `MIC_GAIN_SHIFT = 0` (1×, no amplification) — final tune after starting at 8× and discovering that even 2× saturated mSBC and produced burpy distortion on the far end.
+
+**Two improvements made today beyond the bug fixes:**
+- **BT speaker volume now drives the DAC.** Was hardcoded; now phone's volume buttons during a call actually change the earpiece loudness in real time via DACCONTROL24/25.
+- **HFP AG disabled** (`CONFIG_BT_HFP_AG_ENABLE=n`). We're a Hands-Free client only; the AG role was registered but unused, costing RAM and SDP entries.
+- **I2S DMA buffers increased** (6 × 240 → 12 × 320 frames). Was producing ~33 RX starvation events per second during calls, causing audible TX-side crackling on the earpiece. Bigger buffers ride through BT stack CPU bursts.
+
+**Open issues for next session:**
+- **Still slightly hot on the far end.** Recipient says voice comes through loud even when not speaking into the mouthpiece. Drop PGA from 0x44 (12 dB) to 0x33 (9 dB) or 0x22 (6 dB) as the first tune.
+- **Verify the I2S DMA buffer fix actually helped the crackling** (flashed at end of session, not retested on a real call before wrapping up).
+- **Acoustic echo** — recipient also hears their own voice echoed back. Classic phone-handset coupling between earpiece and mouthpiece (15 cm apart in the same shell). Three paths: (a) lower earpiece volume from phone, cheapest and now possible since we wired BT volume up; (b) drop mic gain further; (c) proper AEC in software, real work.
+- **Rotary dial** still uncalled from main.c — `rotary_dial_init()` exists but isn't wired into the dial-to-call path.
+
+---
+
 ## Next Steps
 
-**Mic (next session — gated on hardware delivery):**
-1. **Order a MAX4466 or MAX9814 preamp breakout module on Amazon.de** (~€5, 1-3 day delivery).
-2. On arrival: desolder the onboard mic capsule from the module, wire the handset's existing red/yellow leads to those pads. Mount the preamp inside the phone base.
-3. Preamp OUT → MIC1 signal pad on the A1S. Preamp Vcc/GND → 3.3 V / GND on the A1S.
-4. Disable codec MICBIAS in firmware (`ADCPOWER = 0x09` instead of `0x00`) — the preamp provides its own bias now.
-5. Real call test — far end should now hear clean speech.
+**Mic — DONE 2026-05-13.** Working end-to-end on a real HFP call, recipient confirmed clean intelligible speech. See 2026-05-13 entry above for the working config and the two firmware bugs that needed fixing.
 
-**After the mic works:**
+**Next session — tuning + features:**
+- Drop PGA from `0x44` to `0x33` or `0x22` (recipient says I'm too loud; should also reduce acoustic echo).
+- Verify I2S DMA buffer increase (12 × 320) fixed the earpiece crackling on a real call.
+
+**After the mic tuning is done:**
 - Rotary dial — module already coded and wired, just needs an end-to-end test (dial a number, confirm digits pulse out via HFP AT+ATD).
 - Wire the permanent 3.5 mm jack for the speaker path (replace the temporary direct-solder LOUT connection).
 - LED ring (WS2812B) with state feedback — pulsing red for ringing, solid green for active call, breathing blue for idle/paired.

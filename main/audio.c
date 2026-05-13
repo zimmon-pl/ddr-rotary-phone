@@ -170,19 +170,28 @@ static esp_err_t es8388_init(void)
     // ADCCONTROL7 = 0x20 restored from 2026-04-17 — specific bit pattern
     // hand-picked when the project was working; bit 6 differs from chip
     // default (0x60) and may control ADC soft-ramp/mute behavior.
-    ret |= es8388_write_reg(0x09, 0x88);  // ADCCONTROL1: PGA gain (24 dB, in spec)
-    ret |= es8388_write_reg(0x0A, 0x00);  // ADCCONTROL2: LIN1/RIN1 (MIC1 footprint via C17)
+    ret |= es8388_write_reg(0x09, 0x44);  // ADCCONTROL1: PGA gain 12 dB — sweet spot with MAX9814 (loud call confirmed 2026-05-13)
+    // ADCCONTROL2 bit layout (per esp-adf reference & ES8388 datasheet):
+    //   bits 7:6 LINSEL — 00=LIN1, 01=LIN2, 11=DIFF
+    //   bits 5:4 RINSEL — 00=RIN1, 01=RIN2, 11=DIFF
+    //   bits 3:0 DSSEL/DSR — only used in DIFF mode
+    // Value 0x50 selects LIN2/RIN2. On this A541 board the "MIC1" silkscreen
+    // pad routes to codec LIN2 (not LIN1) via C17; the LIN1 pin connects to
+    // the LINEIN jack via a trace that is broken on A541. Verified empirically
+    // 2026-05-13: 0x50 produces full mic capture on HFP call; 0x00 produces
+    // stuck DC. Canonical value from esp-adf's ADC_INPUT_LINPUT2_RINPUT2 enum.
+    ret |= es8388_write_reg(0x0A, 0x50);  // ADCCONTROL2: LIN2/RIN2
     ret |= es8388_write_reg(0x0B, 0x02);  // ADCCONTROL3
     ret |= es8388_write_reg(0x0C, 0x0C);  // ADCCONTROL4: 16-bit I2S
     ret |= es8388_write_reg(0x0D, 0x02);  // ADCCONTROL5: MCLK/LRCK = 256
-    ret |= es8388_write_reg(0x0F, 0x20);  // ADCCONTROL7: as written 2026-04-17
+    // ADCCONTROL7 (0x0F) NOT written — leave at chip default 0x60. See diary 2026-05-10.
 
     ret |= es8388_write_reg(0x10, 0x00);  // ADCCONTROL8: digital vol = 0 dB
     ret |= es8388_write_reg(0x11, 0x00);  // ADCCONTROL9: digital vol = 0 dB
 
     ret |= es8388_write_reg(0x0E, 0x00);  // ADCCONTROL6: ADC unmute
 
-    ret |= es8388_write_reg(0x03, 0x00);  // ADCPOWER: power UP ADC, MICBIAS ON
+    ret |= es8388_write_reg(0x03, 0x00);  // ADCPOWER: power UP ADC, MICBIAS ON (keeps bias-resistor network from loading MAX9814 OUT to GND)
 
     // Start state machine
     ret |= es8388_write_reg(0x02, 0xF0);  // CHIPPOWER: reset state machine
@@ -223,6 +232,12 @@ static void pa_enable(void)
 static esp_err_t i2s_init(void)
 {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    // Larger DMA buffers to ride through BT stack CPU bursts (mSBC decode/encode).
+    // Default is 6 × 240; bumping to 12 × 320 gives ~240 ms of buffer at 16 kHz
+    // stereo — eliminates the audible TX clicks (crackling on earpiece) and the
+    // RX starvation events that appeared at ~33/sec during HFP calls.
+    chan_cfg.dma_desc_num = 12;
+    chan_cfg.dma_frame_num = 320;
     esp_err_t ret = i2s_new_channel(&chan_cfg, &i2s_tx_handle, &i2s_rx_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create I2S channels");
@@ -358,6 +373,23 @@ esp_err_t audio_set_volume(uint8_t volume)
     esp_err_t ret = es8388_write_reg(0x1A, reg_val);
     ret |= es8388_write_reg(0x1B, reg_val);
     ESP_LOGI(TAG, "Volume set to %d%% (reg=0x%02X)", volume, reg_val);
+    return ret;
+}
+
+// ---------------------------------------------------------------------------
+// Public: set handset speaker volume from HFP phone-side index (0-15).
+// Maps linearly to DACCONTROL24/25 in the range 0x00 (-30 dB) to 0x1A (-6 dB).
+// We cap at 0x1A because the small 8 Ω handset speaker distorts above that
+// (hand-tuned during the initial speaker bring-up). ES8388 register up to
+// 0x1E = 0 dB; we hold 4 steps back.
+// ---------------------------------------------------------------------------
+esp_err_t audio_set_lout_volume(uint8_t bt_volume)
+{
+    if (bt_volume > 15) bt_volume = 15;
+    uint8_t reg_val = (uint8_t)((bt_volume * 0x1A) / 15);
+    esp_err_t ret = es8388_write_reg(0x2E, reg_val);   // DACCONTROL24: L1 volume
+    ret |= es8388_write_reg(0x2F, reg_val);            // DACCONTROL25: R1 volume
+    ESP_LOGI(TAG, "LOUT volume: BT=%d → reg=0x%02X", bt_volume, reg_val);
     return ret;
 }
 

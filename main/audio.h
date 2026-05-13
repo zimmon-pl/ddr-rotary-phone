@@ -17,6 +17,12 @@ esp_err_t audio_play_tone(uint32_t freq_hz, uint32_t duration_ms);
 // Set DAC digital volume 0-100
 esp_err_t audio_set_volume(uint8_t volume);
 
+// Set handset speaker volume from HFP phone-side volume index (0-15).
+// Maps to ES8388 LOUT1/ROUT1 analog volume (DACCONTROL24/25). Wire this to
+// ESP_HF_CLIENT_VOLUME_CONTROL_EVT (type=TARGET_SPK) so the phone's volume
+// keys actually change the earpiece loudness.
+esp_err_t audio_set_lout_volume(uint8_t bt_volume);
+
 // Set ADC/mic PGA gain — raw ADCCONTROL1 value (0x88 = 24dB, 0xBB ~ 33dB)
 esp_err_t audio_set_mic_gain(uint8_t gain_reg);
 
